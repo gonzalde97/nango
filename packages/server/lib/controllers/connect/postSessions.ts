@@ -3,12 +3,13 @@ import * as z from 'zod';
 import db from '@nangohq/database';
 import * as keystore from '@nangohq/keystore';
 import { defaultOperationExpiration, endUserToMeta, logContextGetter } from '@nangohq/logs';
-import { EndUserMapper, configService } from '@nangohq/shared';
-import { connectUrl, requireEmptyQuery, zodErrorToHTTP } from '@nangohq/utils';
+import { buildTagsFromEndUser, configService, EndUserMapper } from '@nangohq/shared';
+import { buildConnectUiSessionLink, requireEmptyQuery, zodErrorToHTTP } from '@nangohq/utils';
 
-import { endUserSchema, providerConfigKeySchema } from '../../helpers/validation.js';
+import { connectionTagsSchema, endUserSchema, providerConfigKeySchema, webhookUrlSchema } from '../../helpers/validation.js';
 import * as connectSessionService from '../../services/connectSession.service.js';
 import { asyncWrapper } from '../../utils/asyncWrapper.js';
+import { mapDeprecatedConnectionConfigWebhookUrl } from './mapDeprecatedConnectionConfigWebhookUrl.js';
 
 import type { RequestLocals } from '../../utils/express.js';
 import type { Config } from '@nangohq/shared';
@@ -49,7 +50,16 @@ export const bodySchema = z
                     docs_connect: z.string().optional()
                 })
             )
-            .optional()
+            .optional(),
+        webhook_url_override: webhookUrlSchema,
+        tags: connectionTagsSchema.optional()
+    })
+    .strict();
+
+const bodySchemaWithTagsNoEndUser = bodySchema
+    .extend({
+        end_user: endUserSchema.optional(),
+        tags: connectionTagsSchema
     })
     .strict();
 
@@ -65,16 +75,32 @@ export const postConnectSessions = asyncWrapper<PostConnectSessions>(async (req,
         return;
     }
 
+    const { plan } = res.locals;
+
     const val = bodySchema.safeParse(req.body);
-    if (!val.success) {
-        res.status(400).send({ error: { code: 'invalid_body', errors: zodErrorToHTTP(val.error) } });
+    if (val.success) {
+        const body: PostConnectSessions['Body'] = val.data;
+        await generateSession(res, body, plan);
         return;
     }
 
-    const { plan } = res.locals;
+    const bodyIsObject = req.body && typeof req.body === 'object' && !Array.isArray(req.body);
+    const hasTopLevelTags = bodyIsObject && 'tags' in req.body;
+    const hasEndUser = bodyIsObject && 'end_user' in req.body;
+    if (hasTopLevelTags && !hasEndUser) {
+        const valWithTagsNoEndUser = bodySchemaWithTagsNoEndUser.safeParse(req.body);
+        if (!valWithTagsNoEndUser.success) {
+            res.status(400).send({ error: { code: 'invalid_body', errors: zodErrorToHTTP(valWithTagsNoEndUser.error) } });
+            return;
+        }
 
-    const body: PostConnectSessions['Body'] = val.data;
-    await generateSession(res, body, plan);
+        const body: PostConnectSessions['Body'] = valWithTagsNoEndUser.data;
+        await generateSession(res, body, plan);
+        return;
+    }
+
+    res.status(400).send({ error: { code: 'invalid_body', errors: zodErrorToHTTP(val.error) } });
+    return;
 });
 
 /**
@@ -105,6 +131,13 @@ export function checkIntegrationsExist(
 }
 
 export async function generateSession(res: Response<any, Required<RequestLocals>>, body: PostConnectSessions['Body'], plan?: DBPlan | null) {
+    const mapped = mapDeprecatedConnectionConfigWebhookUrl(body);
+    if (!mapped.ok) {
+        res.status(400).send({ error: { code: 'invalid_body', errors: zodErrorToHTTP({ issues: mapped.issues }) } });
+        return;
+    }
+    body = mapped.body;
+
     const { account, environment } = res.locals;
     const { status, response }: Reply = await db.knex.transaction(async (trx) => {
         if (body.allowed_integrations || body.integrations_config_defaults || body.overrides) {
@@ -154,6 +187,8 @@ export async function generateSession(res: Response<any, Required<RequestLocals>
         }
 
         const endUser = body.end_user ? EndUserMapper.apiToEndUser(body.end_user, body.organization) : null;
+        const endUserTags = buildTagsFromEndUser(body.end_user, body.organization);
+        const tags = { ...endUserTags, ...body.tags };
         const logCtx = await logContextGetter.create(
             {
                 operation: { type: 'auth', action: 'create_connection' },
@@ -175,13 +210,19 @@ export async function generateSession(res: Response<any, Required<RequestLocals>
                 ? Object.fromEntries(
                       Object.entries(body.integrations_config_defaults).map(([key, value]) => [
                           key,
-                          { user_scopes: value.user_scopes, authorization_params: value.authorization_params, connectionConfig: value.connection_config }
+                          {
+                              user_scopes: value.user_scopes,
+                              authorization_params: value.authorization_params,
+                              connectionConfig: value.connection_config
+                          }
                       ])
                   )
                 : null,
             operationId: logCtx.id,
             overrides: body.overrides || null,
-            endUser
+            webhookUrlOverride: body.webhook_url_override || null,
+            endUser,
+            tags
         });
         if (createConnectSession.isErr()) {
             return { status: 500, response: { error: { code: 'server_error', message: 'Failed to create connect session' } } };
@@ -201,7 +242,7 @@ export async function generateSession(res: Response<any, Required<RequestLocals>
         }
 
         const [token, privateKey] = createPrivateKey.value;
-        const connect_link = new URL(`${connectUrl}?session_token=${token}`).toString();
+        const connect_link = buildConnectUiSessionLink(token);
         return { status: 201, response: { data: { token, connect_link, expires_at: privateKey.expiresAt!.toISOString() } } };
     });
 

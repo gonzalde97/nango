@@ -3,8 +3,8 @@ import * as z from 'zod';
 import { taskStates } from '@nangohq/scheduler';
 import { Err, Ok } from '@nangohq/utils';
 
-import { TaskAbort, TaskAction, TaskOnEvent, TaskSync, TaskSyncAbort, TaskWebhook } from './types.js';
 import { jsonSchema } from '../utils/validation.js';
+import { TaskAbort, TaskAction, TaskOnEvent, TaskSync, TaskSyncAbort, TaskWebhook } from './types.js';
 
 import type { OrchestratorSchedule, OrchestratorTask } from './types.js';
 import type { Schedule, Task } from '@nangohq/scheduler';
@@ -35,6 +35,7 @@ export const syncArgsSchema = z.object({
     syncName: z.string().min(1),
     syncVariant: z.string().min(1).optional().default('base'), // TODO: remove optional/default
     debug: z.boolean(),
+    emptyCache: z.boolean().default(false),
     ...commonSchemaArgsFields
 });
 
@@ -129,7 +130,8 @@ export function validateTask(task: Task): Result<OrchestratorTask> {
                 retryKey: sync.data.retryKey,
                 ownerKey: sync.data.ownerKey,
                 debug: sync.data.payload.debug,
-                heartbeatTimeoutSecs: sync.data.heartbeatTimeoutSecs
+                heartbeatTimeoutSecs: sync.data.heartbeatTimeoutSecs,
+                emptyCache: sync.data.payload.emptyCache
             })
         );
     }

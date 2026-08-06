@@ -1,7 +1,41 @@
 /* eslint-disable @typescript-eslint/require-await */
 import { Err, Ok } from '@nangohq/utils';
 
+import type { PersistClient } from '../clients/persist.js';
 import type { Result } from '@nangohq/utils';
+
+export interface Locks {
+    tryAcquireLock: ({ owner, key, ttlMs }: { owner: string; key: string; ttlMs: number }) => Promise<Result<boolean>>;
+    releaseLock: ({ owner, key }: { owner: string; key: string }) => Promise<Result<boolean>>;
+    releaseAllLocks: ({ owner }: { owner: string }) => Promise<Result<void>>;
+    hasLock: ({ owner, key }: { owner: string; key: string }) => Promise<Result<boolean>>;
+}
+
+export class HttpLocks implements Locks {
+    private persistClient: PersistClient;
+    private environmentId: number;
+
+    constructor({ persistClient, environmentId }: { persistClient: PersistClient; environmentId: number }) {
+        this.persistClient = persistClient;
+        this.environmentId = environmentId;
+    }
+
+    public async tryAcquireLock({ owner, key, ttlMs }: { owner: string; key: string; ttlMs: number }): Promise<Result<boolean>> {
+        return this.persistClient.tryAcquireLock({ environmentId: this.environmentId, owner, key, ttlMs });
+    }
+
+    public async releaseLock({ owner, key }: { owner: string; key: string }): Promise<Result<boolean>> {
+        return this.persistClient.releaseLock({ environmentId: this.environmentId, owner, key });
+    }
+
+    public async releaseAllLocks({ owner }: { owner: string }): Promise<Result<void>> {
+        return this.persistClient.releaseAllLocks({ environmentId: this.environmentId, owner });
+    }
+
+    public async hasLock({ owner, key }: { owner: string; key: string }): Promise<Result<boolean>> {
+        return this.persistClient.hasLock({ environmentId: this.environmentId, owner, key });
+    }
+}
 
 interface Lock {
     key: string;
@@ -9,7 +43,7 @@ interface Lock {
     expiresAt: Date;
 }
 
-export class Locks {
+export class MapLocks implements Locks {
     private store = new Map<string, Lock>();
 
     public async tryAcquireLock({ owner, key, ttlMs }: { owner: string; key: string; ttlMs: number }): Promise<Result<boolean>> {

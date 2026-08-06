@@ -7,27 +7,44 @@ import * as url from 'url';
 
 import { AxiosError } from 'axios';
 import chalk from 'chalk';
-import promptly from 'promptly';
+import inquirer from 'inquirer';
 import { serializeError } from 'serialize-error';
 import * as unzipper from 'unzipper';
 import * as zod from 'zod';
 
-import { ActionError, BASE_VARIANT, InvalidActionInputSDKError, InvalidActionOutputSDKError, SDKError, validateData } from '@nangohq/runner-sdk';
+import {
+    ActionError,
+    BASE_VARIANT,
+    InvalidActionInputSDKError,
+    InvalidActionOutputSDKError,
+    SDKError,
+    validateCheckpoint,
+    validateData
+} from '@nangohq/runner-sdk';
 
-import { parse } from './config.service.js';
-import { DiagnosticsMonitor, formatDiagnostics } from './diagnostics-monitor.service.js';
-import { loadSchemaJson } from './model.service.js';
-import * as responseSaver from './response-saver.service.js';
 import * as nangoScript from '../sdkScripts.js';
+import { getConfig, getConnection, parseSecretKey, printDebug, resolveHostport } from '../utils.js';
 import { displayValidationError } from '../utils/errors.js';
-import { getConfig, getConnection, hostport, parseSecretKey, printDebug } from '../utils.js';
-import { NangoActionCLI, NangoSyncCLI } from './sdk.js';
-import { buildDefinitions } from '../zeroYaml/definitions.js';
+import { Err, Ok } from '../utils/result.js';
+import { parseIntegrationDefinitions } from '../zeroYaml/definitions.js';
 import { ReadableError } from '../zeroYaml/utils.js';
+import { DiagnosticsMonitor, formatDiagnostics } from './diagnostics-monitor.service.js';
+import { ResponseCollector } from './response-collector.service.js';
+import { NangoActionCLI, NangoSyncCLI } from './sdk.js';
 
 import type { GlobalOptions } from '../types.js';
-import type { NangoActionBase } from '@nangohq/runner-sdk';
-import type { DBSyncConfig, Metadata, NangoProps, NangoYamlParsed, ParsedNangoAction, ParsedNangoSync, ScriptFileType, SdkLogger } from '@nangohq/types';
+import type {
+    Checkpoint,
+    DBSyncConfig,
+    Metadata,
+    NangoProps,
+    NangoYamlParsed,
+    ParsedNangoAction,
+    ParsedNangoSync,
+    Result,
+    ScriptFileType,
+    SdkLogger
+} from '@nangohq/types';
 import type { AxiosResponse } from 'axios';
 
 interface RunArgs extends GlobalOptions {
@@ -37,6 +54,7 @@ interface RunArgs extends GlobalOptions {
     useServerLastSyncDate?: boolean;
     input?: string;
     metadata?: string;
+    checkpoint?: string;
     optionalEnvironment?: string;
     optionalProviderConfigKey?: string;
     saveResponses?: boolean;
@@ -67,7 +85,6 @@ async function loadDynamicModule(moduleName: string) {
 export class DryRunService {
     fullPath: string;
     validation: boolean;
-    isZeroYaml: boolean;
     environment?: string;
     returnOutput?: boolean;
 
@@ -75,18 +92,15 @@ export class DryRunService {
         environment,
         returnOutput = false,
         fullPath,
-        validation,
-        isZeroYaml
+        validation
     }: {
         environment?: string;
         returnOutput?: boolean;
         fullPath: string;
         validation: boolean;
-        isZeroYaml: boolean;
     }) {
         this.fullPath = fullPath;
         this.validation = validation;
-        this.isZeroYaml = isZeroYaml;
         if (environment) {
             this.environment = environment;
         }
@@ -94,28 +108,22 @@ export class DryRunService {
         this.returnOutput = returnOutput;
     }
 
-    public async run(options: RunArgs, debug = false): Promise<string | undefined> {
+    public async run(options: RunArgs, debug = false): Promise<Result<string | undefined>> {
         let syncName = '';
-        let connectionId, suppliedLastSyncDate, actionInput, rawStubbedMetadata, syncVariant;
+        let connectionId, suppliedLastSyncDate, actionInput, rawStubbedMetadata, rawStubbedCheckpoint, syncVariant;
 
         const environment = options.optionalEnvironment || this.environment;
 
         if (!environment) {
-            console.log(chalk.red('Environment is required'));
-            return;
+            const message = 'Environment is required';
+            console.log(chalk.red(message));
+            return Err(message);
         }
 
         await parseSecretKey(environment, debug);
 
-        if (!process.env['NANGO_HOSTPORT']) {
-            if (debug) {
-                printDebug(`NANGO_HOSTPORT is not set. Setting the default to ${hostport}`);
-            }
-            process.env['NANGO_HOSTPORT'] = hostport;
-        }
-
         if (debug) {
-            printDebug(`NANGO_HOSTPORT is set to ${process.env['NANGO_HOSTPORT']}`);
+            printDebug(`NANGO_HOSTPORT is set to ${resolveHostport()}`);
         }
 
         if (Object.keys(options).length > 0) {
@@ -125,13 +133,15 @@ export class DryRunService {
                 connectionId,
                 lastSyncDate: suppliedLastSyncDate,
                 input: actionInput,
-                metadata: rawStubbedMetadata
+                metadata: rawStubbedMetadata,
+                checkpoint: rawStubbedCheckpoint
             } = options);
         }
 
         if (!syncName) {
-            console.log(chalk.red('Sync name is required'));
-            return;
+            const message = 'Sync name is required';
+            console.log(chalk.red(message));
+            return Err(message);
         }
 
         if (!syncVariant) {
@@ -139,32 +149,24 @@ export class DryRunService {
         }
 
         if (!connectionId) {
-            console.log(chalk.red('Connection id is required'));
-            return;
+            const message = 'Connection id is required';
+            console.log(chalk.red(message));
+            return Err(message);
         }
 
-        let parsed: NangoYamlParsed;
-        if (this.isZeroYaml) {
-            const def = await buildDefinitions({ fullPath: this.fullPath, debug });
-            if (def.isErr()) {
-                console.log('');
-                console.log(def.error instanceof ReadableError ? def.error.toText() : chalk.red(def.error.message));
-                return;
-            }
-            parsed = def.value;
-        } else {
-            const parsing = parse(process.cwd(), debug);
-            if (parsing.isErr()) {
-                console.log(chalk.red(parsing.error.message));
-                return;
-            }
-
-            parsed = parsing.value.parsed!;
+        const def = await parseIntegrationDefinitions({ fullPath: this.fullPath, debug });
+        if (def.isErr()) {
+            const message = def.error instanceof ReadableError ? def.error.toText() : def.error.message;
+            console.log('');
+            console.log(def.error instanceof ReadableError ? message : chalk.red(message));
+            return Err(message);
         }
+        const parsed: NangoYamlParsed = def.value;
 
         if (options.optionalProviderConfigKey && !parsed.integrations.some((inte) => inte.providerConfigKey === options.optionalProviderConfigKey)) {
-            console.log(chalk.red(`Integration "${options.optionalProviderConfigKey}" does not exist`));
-            return;
+            const message = `Integration "${options.optionalProviderConfigKey}" does not exist`;
+            console.log(chalk.red(message));
+            return Err(message);
         }
 
         let providerConfigKey: string | undefined;
@@ -183,8 +185,9 @@ export class DryRunService {
                     continue;
                 }
                 if (scriptInfo) {
-                    console.log(chalk.red(`Multiple integrations contain a script named "${syncName}". Please use "--integration-id"`));
-                    return;
+                    const message = `Multiple integrations contain a script named "${syncName}". Please use "--integration-id"`;
+                    console.log(chalk.red(message));
+                    return Err(message);
                 }
                 scriptInfo = script;
                 providerConfigKey = integration.providerConfigKey;
@@ -197,8 +200,9 @@ export class DryRunService {
                         continue;
                     }
                     if (isOnEventScript) {
-                        console.log(chalk.red(`Multiple integrations contain a post connection script named "${syncName}". Please use "--integration-id"`));
-                        return;
+                        const message = `Multiple integrations contain a post connection script named "${syncName}". Please use "--integration-id"`;
+                        console.log(chalk.red(message));
+                        return Err(message);
                     }
                     isOnEventScript = true;
                     providerConfigKey = integration.providerConfigKey;
@@ -207,19 +211,16 @@ export class DryRunService {
         }
 
         if ((!scriptInfo && !isOnEventScript) || !providerConfigKey) {
-            console.log(
-                chalk.red(
-                    `No script matched "${syncName}"${options.optionalProviderConfigKey ? ` for integration "${options.optionalProviderConfigKey}"` : ''}`
-                )
-            );
-            return;
+            const message = `No script matched "${syncName}"${options.optionalProviderConfigKey ? ` for integration "${options.optionalProviderConfigKey}"` : ''}`;
+            console.log(chalk.red(message));
+            return Err(message);
         }
 
         if (debug && scriptInfo) {
             printDebug(`Found integration ${providerConfigKey}, ${scriptInfo.type} ${scriptInfo.name} `);
         }
 
-        const nangoConnection = await getConnection(
+        const nangoConnectionRes = await getConnection(
             providerConfigKey,
             connectionId,
             {
@@ -228,9 +229,15 @@ export class DryRunService {
             },
             debug
         );
+        if (nangoConnectionRes.isErr()) {
+            console.log(chalk.red(nangoConnectionRes.error.message));
+            return Err(nangoConnectionRes.error);
+        }
+        const nangoConnection = nangoConnectionRes.value;
         if (!nangoConnection) {
-            console.log(chalk.red('Connection not found'));
-            return;
+            const message = 'Connection not found';
+            console.log(chalk.red(message));
+            return Err(message);
         }
 
         if (debug) {
@@ -238,16 +245,20 @@ export class DryRunService {
         }
 
         const resConfig = await getConfig(providerConfigKey, debug);
-        if (!resConfig || !resConfig.data) {
-            return;
+        if (resConfig.isErr()) {
+            console.log(chalk.red(resConfig.error.message));
+            return Err(resConfig.error);
+        }
+        if (!resConfig.value.data) {
+            return Err(`Integration "${providerConfigKey}" config is empty`);
         }
 
-        const { provider } = resConfig.data;
+        const { provider } = resConfig.value.data;
         if (debug) {
             printDebug(`Provider found: ${provider}`);
         }
 
-        if (process.env['NANGO_HOSTPORT']?.endsWith('.nango.dev')) {
+        if (resolveHostport().endsWith('.nango.dev')) {
             process.env['NANGO_CLOUD'] = 'true';
         }
 
@@ -270,58 +281,42 @@ export class DryRunService {
         let stubbedMetadata: Metadata | undefined = undefined;
         let normalizedInput;
 
-        const saveResponsesDir = `${process.env['NANGO_MOCKS_RESPONSE_DIRECTORY'] ?? ''}${providerConfigKey}`;
-        const saveResponsesSyncDir = `${saveResponsesDir}/mocks/${syncName}${syncVariant && syncVariant !== BASE_VARIANT ? `/${syncVariant}` : ''}`;
-
         if (actionInput) {
-            if (actionInput.startsWith('@') && actionInput.endsWith('.json')) {
-                const fileContents = readFile(actionInput);
-                if (!fileContents) {
-                    console.log(chalk.red('The file could not be read. Please make sure it exists.'));
-                    return;
-                }
-                try {
-                    normalizedInput = JSON.parse(fileContents);
-                } catch {
-                    console.log(chalk.red('There was an issue parsing the action input file. Please make sure it is valid JSON.'));
-                    return;
-                }
-            } else {
-                try {
-                    normalizedInput = JSON.parse(actionInput);
-                } catch {
-                    throw new Error('Failed to parse --input');
-                }
+            const result = parseJsonArg(actionInput, 'input');
+            if (!result.ok) {
+                console.log(chalk.red(result.message));
+                return Err(result.message);
             }
+            normalizedInput = result.value;
         }
 
         if (rawStubbedMetadata) {
-            if (rawStubbedMetadata.startsWith('@') && rawStubbedMetadata.endsWith('.json')) {
-                const fileContents = readFile(rawStubbedMetadata);
-                if (!fileContents) {
-                    console.log(chalk.red('The metadata file could not be read. Please make sure it exists.'));
-                    return;
-                }
-                try {
-                    stubbedMetadata = JSON.parse(fileContents);
-                } catch {
-                    console.log(chalk.red('There was an issue parsing the metadata file. Please make sure it is valid JSON.'));
-                    return;
-                }
-            } else {
-                try {
-                    stubbedMetadata = JSON.parse(rawStubbedMetadata);
-                } catch {
-                    throw new Error('fail to parse --metadata');
-                }
+            const result = parseJsonArg(rawStubbedMetadata, 'metadata');
+            if (!result.ok) {
+                console.log(chalk.red(result.message));
+                return Err(result.message);
+            }
+            stubbedMetadata = result.value;
+        }
+
+        let stubbedCheckpoint: Checkpoint | undefined = undefined;
+
+        if (rawStubbedCheckpoint) {
+            const result = parseJsonArg(rawStubbedCheckpoint, 'checkpoint');
+            if (!result.ok) {
+                console.log(chalk.red(result.message));
+                return Err(result.message);
+            }
+            try {
+                stubbedCheckpoint = validateCheckpoint(result.value);
+            } catch (err) {
+                const message = err instanceof Error ? err.message : 'Invalid checkpoint';
+                console.log(chalk.red(message));
+                return Err(message);
             }
         }
 
-        const jsonSchema = loadSchemaJson({ fullPath: this.fullPath });
-        if (!jsonSchema) {
-            console.log(chalk.red('Failed to load schema.json'));
-            return;
-        }
+        const responseCollector = new ResponseCollector();
 
         try {
             const syncConfig: DBSyncConfig = {
@@ -340,14 +335,14 @@ export class DryRunService {
                 nango_config_id: 1,
                 runs: '',
                 webhook_subscriptions: [],
-                models_json_schema: jsonSchema,
+                models_json_schema: scriptInfo?.json_schema || null,
                 created_at: new Date(),
                 updated_at: new Date(),
                 attributes: {},
-                is_public: false,
+                source: 'repo',
                 metadata: {},
-                pre_built: false,
                 sdk_version: null,
+                features: [],
                 sync_type: lastSyncDate ? 'incremental' : 'full',
                 version: '0.0.1'
             };
@@ -358,7 +353,7 @@ export class DryRunService {
             const nangoProps: NangoProps = {
                 isCLI: true,
                 scriptType: scriptInfo?.type || 'sync',
-                host: process.env['NANGO_HOSTPORT'],
+                host: resolveHostport(),
                 connectionId: nangoConnection.connection_id,
                 environmentId: -1,
                 environmentName: environment,
@@ -378,7 +373,8 @@ export class DryRunService {
                     validateActionInput: this.validation, // irrelevant for cli
                     validateActionOutput: this.validation, // irrelevant for cli
                     validateSyncRecords: this.validation,
-                    validateSyncMetadata: false
+                    validateSyncMetadata: false,
+                    exportRunnerTelemetry: false // irrelevant for cli
                 },
                 startedAt: new Date(),
                 endUser: null,
@@ -387,23 +383,8 @@ export class DryRunService {
             if (options.saveResponses) {
                 nangoProps.axios = {
                     response: {
-                        onFulfilled: (response: AxiosResponse) =>
-                            responseSaver.onAxiosRequestFulfilled({
-                                response,
-                                providerConfigKey,
-                                connectionId: nangoConnection.connection_id,
-                                syncName,
-                                syncVariant,
-                                hasStubbedMetadata: Boolean(stubbedMetadata)
-                            }),
-                        onRejected: (error: unknown) =>
-                            responseSaver.onAxiosRequestRejected({
-                                error,
-                                providerConfigKey,
-                                connectionId: nangoConnection.connection_id,
-                                syncName,
-                                syncVariant
-                            })
+                        onFulfilled: (response: AxiosResponse) => responseCollector.onAxiosRequestFulfilled(response, nangoConnection.connection_id),
+                        onRejected: (error: unknown) => responseCollector.onAxiosRequestRejected(error)
                     }
                 };
             }
@@ -413,7 +394,8 @@ export class DryRunService {
                 nangoProps,
                 loadLocation: './',
                 input: normalizedInput,
-                stubbedMetadata: stubbedMetadata,
+                stubbedMetadata,
+                stubbedCheckpoint,
                 ...(options.diagnostics && { diagnostics: options.diagnostics })
             });
 
@@ -424,31 +406,15 @@ export class DryRunService {
                     console.error(chalk.red(err.message), chalk.gray(`(${err.code})`));
                     if (err.code === 'invalid_action_output' || err.code === 'invalid_action_input' || err.type === 'invalid_sync_record') {
                         displayValidationError(err.payload);
-                        return;
+                        return Err(err.message);
                     }
 
                     console.error(JSON.stringify(err.payload, null, 2));
-                    return;
+                    return Err(err.message);
                 }
 
                 console.error(err instanceof Error ? JSON.stringify(err, ['name', 'message'], 2) : JSON.stringify(err, null, 2));
-                return;
-            }
-
-            // Save input and metadata only after validation passes
-            if (options.saveResponses) {
-                if (normalizedInput) {
-                    responseSaver.ensureDirectoryExists(saveResponsesSyncDir);
-                    const filePath = `${saveResponsesSyncDir}/input.json`;
-                    const dataToWrite = typeof normalizedInput === 'object' ? JSON.stringify(normalizedInput, null, 2) : normalizedInput;
-                    fs.writeFileSync(filePath, dataToWrite);
-                }
-
-                if (stubbedMetadata) {
-                    responseSaver.ensureDirectoryExists(`${saveResponsesDir}/mocks/nango`);
-                    const filePath = `${saveResponsesDir}/mocks/nango/getMetadata.json`;
-                    fs.writeFileSync(filePath, JSON.stringify(stubbedMetadata, null, 2));
-                }
+                return Err(err instanceof Error ? err.message : JSON.stringify(err));
             }
 
             const resultOutput = [];
@@ -458,79 +424,81 @@ export class DryRunService {
                     resultOutput.push(chalk.gray('no output'));
                 } else {
                     console.log(JSON.stringify(results.response.output, null, 2));
-                    if (options.saveResponses) {
-                        responseSaver.ensureDirectoryExists(saveResponsesSyncDir);
-                        const filePath = `${saveResponsesSyncDir}/output.json`;
-                        const { nango, ...responseWithoutNango } = results.response;
-                        fs.writeFileSync(filePath, JSON.stringify(responseWithoutNango.output, null, 2));
-                    }
                     resultOutput.push(JSON.stringify(results.response, null, 2));
                 }
             }
 
-            const logMessages = results.response?.nango && results.response.nango instanceof NangoSyncCLI && results.response.nango.logMessages;
-            if (logMessages && logMessages.messages.length > 0) {
-                const messages = logMessages.messages;
-                let index = 0;
-                const batchCount = 10;
+            const nangoInstance = results.response?.nango;
+            if (nangoInstance instanceof NangoSyncCLI) {
+                const logMessages = nangoInstance.logMessages;
+                if (logMessages && logMessages.messages.length > 0) {
+                    const messages = logMessages.messages;
+                    let index = 0;
+                    const batchCount = 10;
 
-                const displayBatch = () => {
-                    for (let i = 0; i < batchCount && index < messages.length; i++, index++) {
-                        const logs = messages[index];
-                        console.log(chalk.yellow(JSON.stringify(logs, null, 2)));
-                        resultOutput.push(JSON.stringify(logs, null, 2));
-                    }
-                };
+                    const displayBatch = () => {
+                        for (let i = 0; i < batchCount && index < messages.length; i++, index++) {
+                            const logs = messages[index];
+                            console.log(chalk.yellow(JSON.stringify(logs, null, 2)));
+                            resultOutput.push(JSON.stringify(logs, null, 2));
+                        }
+                    };
 
-                console.log(chalk.yellow(`The dry run would produce the following results: ${JSON.stringify(logMessages.counts, null, 2)}`));
-                resultOutput.push(`The dry run would produce the following results: ${JSON.stringify(logMessages.counts, null, 2)}`);
-                console.log(chalk.yellow('The following log messages were generated:'));
-                resultOutput.push('The following log messages were generated:');
+                    console.log(chalk.yellow(`The dry run would produce the following results: ${JSON.stringify(logMessages.counts, null, 2)}`));
+                    resultOutput.push(`The dry run would produce the following results: ${JSON.stringify(logMessages.counts, null, 2)}`);
+                    console.log(chalk.yellow('The following log messages were generated:'));
+                    resultOutput.push('The following log messages were generated:');
 
-                displayBatch();
+                    displayBatch();
 
-                while (index < logMessages.messages.length) {
-                    const remaining = logMessages.messages.length - index;
-                    const confirmation = options.autoConfirm
-                        ? true
-                        : await promptly.confirm(`There are ${remaining} logs messages remaining. Would you like to see the next 10 log messages? (y/n)`);
-                    if (confirmation) {
-                        displayBatch();
-                    } else {
-                        break;
+                    while (index < messages.length) {
+                        const remaining = messages.length - index;
+                        const { confirmation } = options.autoConfirm
+                            ? { confirmation: true }
+                            : await inquirer.prompt([
+                                  {
+                                      type: 'confirm',
+                                      name: 'confirmation',
+                                      message: `There are ${remaining} log messages remaining. Would you like to see the next 10 log messages?`
+                                  }
+                              ]);
+                        if (confirmation) {
+                            displayBatch();
+                        } else {
+                            break;
+                        }
                     }
                 }
 
-                if (options.saveResponses && results.response?.nango && results.response?.nango instanceof NangoSyncCLI) {
-                    const nango = results.response.nango;
+                if (options.saveResponses) {
                     if (scriptInfo?.output) {
                         for (const model of scriptInfo.output) {
-                            const modelFullName = nango.modelFullName(model);
-                            const modelDir = `${saveResponsesSyncDir}/${model}`;
-                            responseSaver.ensureDirectoryExists(modelDir);
-                            {
-                                const filePath = `${modelDir}/batchSave.json`;
-                                const modelData = nango.rawSaveOutput.get(modelFullName) || [];
-                                fs.writeFileSync(filePath, JSON.stringify(modelData, null, 2));
-                            }
-
-                            {
-                                const filePath = `${modelDir}/batchDelete.json`;
-                                const modelData = nango.rawDeleteOutput.get(modelFullName) || [];
-                                fs.writeFileSync(filePath, JSON.stringify(modelData, null, 2));
-                            }
+                            const modelFullName = nangoInstance.modelFullName(model);
+                            responseCollector.addBatchSave(modelFullName, nangoInstance.rawSaveOutput.get(modelFullName) || []);
+                            responseCollector.addBatchDelete(modelFullName, nangoInstance.rawDeleteOutput.get(modelFullName) || []);
                         }
                     }
                 }
             }
 
-            if (this.returnOutput) {
-                return resultOutput.join('\n');
+            if (options.saveResponses) {
+                const testFilePath = `${this.fullPath}/${providerConfigKey}/tests/${syncName}.test.json`;
+                responseCollector.saveUnifiedMock({
+                    filePath: testFilePath,
+                    input: normalizedInput,
+                    output: results.response?.output,
+                    stubbedMetadata: stubbedMetadata
+                });
+                console.log(chalk.green(`\n✅ Mocks saved to ${testFilePath}`));
             }
 
-            process.exit(0);
-        } catch {
-            process.exit(1);
+            if (this.returnOutput) {
+                return Ok(resultOutput.join('\n'));
+            }
+
+            return Ok(undefined);
+        } catch (err) {
+            return Err(err instanceof Error ? err : new Error('Dry run failed'));
         }
     }
 
@@ -540,6 +508,7 @@ export class DryRunService {
         loadLocation,
         input,
         stubbedMetadata,
+        stubbedCheckpoint,
         diagnostics
     }: {
         syncName: string;
@@ -547,6 +516,7 @@ export class DryRunService {
         loadLocation: string;
         input: object;
         stubbedMetadata: Metadata | undefined;
+        stubbedCheckpoint: Checkpoint | undefined;
         diagnostics?: boolean;
     }): Promise<
         { success: false; error: any; response: null } | { success: true; error: null; response: { output: any; nango: NangoSyncCLI | NangoActionCLI } }
@@ -555,13 +525,12 @@ export class DryRunService {
             environment: nangoProps.environmentName,
             returnOutput: true,
             fullPath: this.fullPath,
-            validation: this.validation,
-            isZeroYaml: this.isZeroYaml
+            validation: this.validation
         });
         const nango =
             nangoProps.scriptType === 'sync' || nangoProps.scriptType === 'webhook'
-                ? new NangoSyncCLI(nangoProps, { dryRunService: drs, stubbedMetadata })
-                : new NangoActionCLI(nangoProps, { dryRunService: drs });
+                ? new NangoSyncCLI(nangoProps, { dryRunService: drs, stubbedMetadata, stubbedCheckpoint })
+                : new NangoActionCLI(nangoProps, { dryRunService: drs, stubbedCheckpoint });
 
         const monitor = diagnostics ? new DiagnosticsMonitor() : null;
 
@@ -572,8 +541,7 @@ export class DryRunService {
             const script = getIntegrationFile({
                 syncName,
                 nangoProps,
-                location: loadLocation,
-                isZeroYaml: this.isZeroYaml
+                location: loadLocation
             });
             const isAction = nangoProps.scriptType === 'action';
 
@@ -631,19 +599,23 @@ export class DryRunService {
                     URL,
                     URLSearchParams
                 };
+                Object.setPrototypeOf(sandbox, null);
 
-                const context = vm.createContext(sandbox);
-                const scriptExports: { default?: ((nango: NangoActionBase, payload?: object) => Promise<unknown>) | nangoScript.CreateAnyResponse } =
-                    scriptObj.runInContext(context);
+                const context = vm.createContext(sandbox, {
+                    codeGeneration: {
+                        strings: false,
+                        wasm: false
+                    }
+                });
+                const scriptExports: {
+                    default?: ((nango: NangoActionCLI | NangoSyncCLI, payload?: object) => Promise<unknown>) | nangoScript.CreateAnyResponse;
+                } = scriptObj.runInContext(context);
 
                 if (!scriptExports.default) {
                     const content = `There is no default export that is a function for ${syncName}`;
                     return { success: false, error: new Error(content), response: null };
                 }
-                if (!this.isZeroYaml && !(typeof scriptExports.default === 'function')) {
-                    const content = `The default export must be a function for ${syncName}`;
-                    return { success: false, error: new Error(content), response: null };
-                } else if (this.isZeroYaml && !('type' in scriptExports.default)) {
+                if (!('type' in scriptExports.default)) {
                     const content = `Invalid default export for ${syncName}`;
                     return { success: false, error: new Error(content), response: null };
                 }
@@ -670,16 +642,11 @@ export class DryRunService {
                         }
                     }
 
-                    let output: unknown;
-                    if (typeof scriptExports.default !== 'function') {
-                        const payload = scriptExports.default;
-                        if (payload.type !== 'action') {
-                            throw new Error('Incorrect script loaded for action');
-                        }
-                        output = await payload.exec(nango, input);
-                    } else {
-                        output = await scriptExports.default(nango, input);
+                    const payload = scriptExports.default;
+                    if (payload.type !== 'action') {
+                        throw new Error('Incorrect script loaded for action');
                     }
+                    const output = await payload.exec(nango, input);
 
                     // Validate action output against json schema
                     const modelNameOutput =
@@ -705,18 +672,13 @@ export class DryRunService {
                 }
 
                 // Sync
-                if (typeof scriptExports.default !== 'function') {
-                    const payload = scriptExports.default as unknown as nangoScript.CreateSyncResponse<any, any>;
-                    if (payload.type !== 'sync') {
-                        throw new Error('Incorrect script loaded for sync');
-                    }
-
-                    const results = await payload.exec(nango as any);
-                    return { success: true, response: { output: results, nango }, error: null };
-                } else {
-                    const results = await scriptExports.default(nango);
-                    return { success: true, error: null, response: { output: results, nango } };
+                const syncPayload = scriptExports.default as unknown as nangoScript.CreateSyncResponse<any, any>;
+                if (syncPayload.type !== 'sync') {
+                    throw new Error('Incorrect script loaded for sync');
                 }
+
+                await syncPayload.exec(nango as any);
+                return { success: true, response: { output: undefined, nango }, error: null };
             } catch (err) {
                 if (err instanceof ActionError) {
                     return {
@@ -803,6 +765,25 @@ export class DryRunService {
     }
 }
 
+function parseJsonArg(raw: string, argName: string): { ok: true; value: any } | { ok: false; message: string } {
+    if (raw.startsWith('@') && raw.endsWith('.json')) {
+        const fileContents = readFile(raw);
+        if (!fileContents) {
+            return { ok: false, message: `The ${argName} file could not be read. Please make sure it exists.` };
+        }
+        try {
+            return { ok: true, value: JSON.parse(fileContents) };
+        } catch {
+            return { ok: false, message: `There was an issue parsing the ${argName} file. Please make sure it is valid JSON.` };
+        }
+    }
+    try {
+        return { ok: true, value: JSON.parse(raw) };
+    } catch {
+        return { ok: false, message: `Failed to parse --${argName}` };
+    }
+}
+
 function readFile(rawFilePath: string): string | null {
     try {
         const filePath = rawFilePath.replace('@', '');
@@ -816,34 +797,9 @@ function readFile(rawFilePath: string): string | null {
     }
 }
 
-function getIntegrationFile({
-    syncName,
-    location,
-    nangoProps,
-    isZeroYaml
-}: {
-    syncName: string;
-    nangoProps: NangoProps;
-    location: string;
-    isZeroYaml: boolean;
-}): string | null {
+function getIntegrationFile({ syncName, location, nangoProps }: { syncName: string; nangoProps: NangoProps; location: string }): string | null {
     try {
-        if (isZeroYaml) {
-            return fs.readFileSync(`${location}build/${nangoProps.providerConfigKey}_${nangoProps.scriptType}s_${syncName}.cjs`, 'utf8');
-        }
-
-        const filePath = `${location}dist/${syncName}.js`;
-        const fileNameWithProviderConfigKey = filePath.replace(`.js`, `-${nangoProps.providerConfigKey}.js`);
-
-        let realPath;
-        if (fs.existsSync(fileNameWithProviderConfigKey)) {
-            realPath = fs.realpathSync(fileNameWithProviderConfigKey);
-        } else {
-            realPath = fs.realpathSync(filePath);
-        }
-        const integrationFileContents = fs.readFileSync(realPath, 'utf8');
-
-        return integrationFileContents;
+        return fs.readFileSync(`${location}build/${nangoProps.providerConfigKey}_${nangoProps.scriptType}s_${syncName}.cjs`, 'utf8');
     } catch (err) {
         console.log(err);
         return null;

@@ -1,5 +1,5 @@
 import type { AllAuthCredentials, AuthModeType, AuthOperationType } from '../auth/api.js';
-import type { TimestampsAndDeletedCorrect } from '../db.js';
+import type { Tags, TimestampsAndDeletedCorrect } from '../db.js';
 import type { InternalEndUser } from '../endUser/index.js';
 import type { DBEnvironment } from '../environment/db.js';
 import type { DBTeam } from '../team/db.js';
@@ -19,12 +19,18 @@ export interface DBConnection extends TimestampsAndDeletedCorrect {
     id: number;
     config_id: number;
     end_user_id: number | null;
+    tags: Tags;
     /**
      * @deprecated
      */
     provider_config_key: string;
     connection_id: string;
     connection_config: ConnectionConfig;
+    /**
+     * Backend-set override of the environment's webhook URLs for this connection. Distinct from `connection_config`,
+     * which holds end-user-supplied, provider-declared inputs (see providers.yaml). Only sourced from the connect session.
+     */
+    webhook_url_override: string | null;
     environment_id: number;
     metadata: Metadata | null;
     credentials: { encrypted_credentials?: string };
@@ -56,7 +62,7 @@ export interface FailedConnectionError {
 }
 
 export interface RecentlyFailedConnection {
-    connection: DBConnection | Pick<DBConnection, 'connection_id' | 'provider_config_key'>;
+    connection: DBConnection | (Pick<DBConnection, 'connection_id' | 'provider_config_key'> & Partial<Pick<DBConnection, 'webhook_url_override'>>);
     auth_mode: AuthModeType;
     error?: FailedConnectionError;
     operation: AuthOperationType;

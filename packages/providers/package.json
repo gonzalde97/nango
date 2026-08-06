@@ -1,21 +1,27 @@
 {
     "name": "@nangohq/providers",
-    "version": "0.69.20",
+    "version": "0.71.3",
     "description": "Nango's providers.yaml and getters",
     "type": "module",
     "main": "./dist/index.js",
     "typings": "./dist/index.d.ts",
     "private": false,
     "scripts": {},
-    "dependencies": {
-        "js-yaml": "4.1.1"
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/NangoHQ/nango.git",
+        "directory": "packages/providers"
     },
     "devDependencies": {
-        "@nangohq/types": "0.69.20",
-        "vitest": "3.2.4"
+        "@nangohq/types": "0.71.3",
+        "vitest": "4.1.9"
     },
     "files": [
         "dist/**/*",
-        "providers.yaml"
-    ]
+        "providers.yaml",
+        "providers.scopes.yaml"
+    ],
+    "dependencies": {
+        "js-yaml": "4.3.0"
+    }
 }

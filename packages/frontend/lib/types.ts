@@ -1,4 +1,4 @@
-import type { ConnectUISettings, ConnectionResponseSuccess } from '@nangohq/types';
+import type { ConnectionResponseSuccess, ConnectUISettings } from '@nangohq/types';
 
 export type AuthErrorType =
     | 'missing_auth_token'
@@ -27,21 +27,23 @@ export interface ConnectionConfig {
     user_scope?: string[];
     authorization_params?: Record<string, string | undefined>;
     installation?: 'outbound';
+    assertionOption?: Record<string, string>;
     credentials?:
         | OAuthCredentialsOverride
         | BasicApiCredentials
         | ApiKeyCredentials
-        | AppStoreCredentials
         | TBACredentials
         | JwtCredentials
         | TwoStepCredentials
         | OAuth2ClientCredentials
-        | SignatureCredentials;
+        | SignatureCredentials
+        | AwsSigV4Credentials;
 }
 
 export interface OAuthCredentialsOverride {
     oauth_client_id_override: string;
     oauth_client_secret_override: string;
+    oauth_refresh_token_override?: string;
 }
 
 export interface BasicApiCredentials {
@@ -51,13 +53,6 @@ export interface BasicApiCredentials {
 
 export interface ApiKeyCredentials {
     apiKey?: string;
-}
-
-export interface AppStoreCredentials {
-    privateKeyId: string;
-    issuerId: string;
-    privateKey: string;
-    scope?: string[];
 }
 
 export interface TBACredentials {
@@ -74,7 +69,7 @@ export interface JwtCredentials {
 
 export interface OAuth2ClientCredentials {
     client_id: string;
-    client_secret: string;
+    client_secret?: string;
     client_certificate?: string;
     client_private_key?: string;
 }
@@ -95,6 +90,12 @@ export interface SignatureCredentials {
     type: 'SIGNATURE';
     username: string;
     password: string;
+}
+
+export interface AwsSigV4Credentials {
+    type: 'AWS_SIGV4';
+    role_arn: string;
+    region?: string;
 }
 
 // This one is sent by parent only

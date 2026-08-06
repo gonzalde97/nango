@@ -1,4 +1,47 @@
+import { URL } from 'url';
+
 import * as z from 'zod';
+
+import {
+    connectionTagsKeySchema,
+    connectionTagsSchema,
+    getServerOutboundUrlPolicy,
+    isOutboundUrlAllowed,
+    TAG_MAX_COUNT,
+    validateCaseInsensitiveTagKeys
+} from '@nangohq/shared';
+
+import { envs } from '../env.js';
+
+export { TAG_MAX_COUNT, connectionTagsKeySchema, connectionTagsSchema };
+
+/**
+ * Validates a webhook URL: must be a valid URL (or empty), cannot point to Nango's own domain,
+ * and cannot resolve to a blocked host (loopback, private, link-local, metadata, ...).
+ */
+export const webhookUrlSchema = z
+    .union([z.url(), z.literal('')])
+    .optional()
+    .refine(
+        (url) => {
+            if (!url || url.trim() === '') return true;
+            const hostname = new URL(url).hostname.replace(/\.+$/, '');
+            return hostname !== 'nango.dev' && !hostname.endsWith('.nango.dev');
+        },
+        { message: `Webhook URLs cannot point to Nango's domain (nango.dev).` }
+    )
+    .refine(
+        (url) => {
+            if (!url || url.trim() === '') return true;
+            return isOutboundUrlAllowed(url, getServerOutboundUrlPolicy());
+        },
+        { message: 'This webhook URL is not allowed.' }
+    );
+
+// Connection params come from untrusted clients. `webhook_url` is intentionally NOT accepted here: it is a
+// privileged routing directive set only by trusted actors (connect session, public API, dashboard). Any
+// client-supplied `webhook_url` is stripped in getConnectionConfig.
+export const connectionConfigParamsSchema = z.looseObject({}).optional();
 
 export const providerSchema = z
     .string()
@@ -18,6 +61,17 @@ export const scriptNameSchema = z
     .string()
     .regex(/^[a-zA-Z0-9_-]+$/)
     .max(255);
+export const functionTypeSchema = z.enum(['sync', 'action', 'on-event']);
+// On-event functions can't be targeted by name alone yet, so deletion is limited to sync/action.
+export const deletableFunctionTypeSchema = z.enum(['sync', 'action']);
+// Shared querystring fields for the function-list endpoints. The private route adds `env`; the public route
+// derives the environment from the secret key, so it spreads these as-is.
+export const functionListQueryFields = {
+    type: functionTypeSchema.optional(),
+    search: z.string().trim().min(1).max(255).optional(),
+    page: z.coerce.number().int().min(0).optional().default(0),
+    limit: z.coerce.number().int().min(1).max(100).optional().default(20)
+};
 export const connectionIdSchema = z
     .string()
     .regex(/^[a-zA-Z0-9,.;:=+~[\]|@${}"'\\/_ -]+$/) // For legacy reason (some people are stringifying json and passing email)
@@ -98,8 +152,8 @@ export const sharedCredentialsSchema = z
     .strict();
 
 export const connectionCredentialsOauth2Schema = z.strictObject({
-    access_token: z.string().min(1).max(4096),
-    refresh_token: z.string().min(1).max(4096).optional(),
+    access_token: z.string().min(1).max(envs.NANGO_SERVER_OAUTH2_TOKEN_MAX_LENGTH),
+    refresh_token: z.string().min(1).max(envs.NANGO_SERVER_OAUTH2_TOKEN_MAX_LENGTH).optional(),
     expires_at: z.coerce.date().optional(),
     config_override: z
         .strictObject({
@@ -110,7 +164,7 @@ export const connectionCredentialsOauth2Schema = z.strictObject({
 });
 
 export const connectionCredentialsOauth2CCSchema = z.strictObject({
-    token: z.string().min(1).max(2048),
+    token: z.string().min(1).max(4096),
     client_id: z.string().min(1).max(255),
     client_secret: z.string().min(1).max(2048),
     client_certificate: z.string().min(1).max(10000).optional(),
@@ -148,17 +202,21 @@ export const connectionCredentialsGithubAppSchema = z.strictObject({
     installation_id: z.string().min(1).max(255)
 });
 
-export const connectionTagsSchema = z
+export const connectionEndUserTagsSchema = z
     // Please be careful when changing this:
     // It's a labelling system, if we allow more than string people will store complex data (e.g: nested object) and ask for features around that
     // + It's an object not a an array of string because customers wants to store layers of origin (e.g: projectId, orgId, etc.)
     // But they complained a lot about concatenation of string, so an object solves that cleanly
-    .record(z.string(), z.string())
-    .refine((v) => Object.keys(v).length < 64, { message: 'Tags can not contain more than 64 keys' });
+    .record(connectionTagsKeySchema, z.string().max(255))
+    .check((payload) => {
+        for (const message of validateCaseInsensitiveTagKeys(payload.value)) {
+            payload.issues.push({ code: 'custom', message, input: payload.value });
+        }
+    });
 
 export const endUserSchema = z.strictObject({
     id: z.string().max(255).min(1),
     email: z.string().email().min(5).optional(),
     display_name: z.string().max(255).optional(),
-    tags: connectionTagsSchema.optional()
+    tags: connectionEndUserTagsSchema.optional()
 });

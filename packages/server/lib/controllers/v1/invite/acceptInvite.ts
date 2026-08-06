@@ -1,7 +1,7 @@
 import * as z from 'zod';
 
 import { acceptInvitation, getInvitation, userService } from '@nangohq/shared';
-import { requireEmptyQuery, zodErrorToHTTP } from '@nangohq/utils';
+import { normalizeEmail, requireEmptyQuery, zodErrorToHTTP } from '@nangohq/utils';
 
 import { asyncWrapper } from '../../../utils/asyncWrapper.js';
 
@@ -31,21 +31,21 @@ export const acceptInvite = asyncWrapper<AcceptInvite>(async (req, res) => {
     const { user } = res.locals;
     const data: AcceptInvite['Params'] = val.data;
     const invitation = await getInvitation(data.id);
-    if (!invitation || invitation.email !== user.email) {
+    if (!invitation || normalizeEmail(invitation.email) !== normalizeEmail(user.email)) {
         res.status(400).send({ error: { code: 'not_found', message: 'Invitation does not exist or is expired' } });
         return;
     }
 
     await acceptInvitation(data.id);
-    const updated = await userService.update({ id: user.id, account_id: invitation.account_id });
+    const updated = await userService.update({ id: user.id, account_id: invitation.account_id, role: invitation.role });
     if (!updated) {
         res.status(500).send({ error: { code: 'server_error', message: 'failed to update user team' } });
         return;
     }
 
     // User is stored in session, so we need to update the DB
-    // @ts-expect-error you got to love passport
-    req.session.passport.user = updated;
+    const passportSession = (req.session as typeof req.session & { passport: { user: typeof updated } }).passport;
+    passportSession.user = updated;
     req.session.save((err) => {
         if (err) {
             res.status(500).send({ error: { code: 'server_error', message: 'failed to update session' } });

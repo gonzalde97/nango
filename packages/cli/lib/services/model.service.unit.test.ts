@@ -1,12 +1,10 @@
-import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { parse } from './config.service.js';
-import { buildModelsTS, fieldToTypescript, fieldsToTypescript, getExportToJSON } from './model.service.js';
 import { removeVersion } from '../tests/helpers.js';
+import { parse } from './config.service.js';
+import { buildModelsTS, fieldsToTypescript, fieldToTypescript } from './model.service.js';
 
 import type { NangoModel } from '@nangohq/types';
 
@@ -88,6 +86,80 @@ describe('buildModelTs', () => {
             acc.push(line);
         }
         expect(removeVersion(acc.join('\n'))).toMatchSnapshot();
+    });
+
+    it('should generate JSDoc comments for model and field descriptions', () => {
+        const models: NangoModel[] = [
+            {
+                name: 'User',
+                description: 'Represents a user in the system',
+                fields: [
+                    {
+                        name: '__string',
+                        value: 'string',
+                        tsType: true,
+                        dynamic: true,
+                        description: 'Dynamic string field for additional properties'
+                    },
+                    {
+                        name: 'id',
+                        value: 'number',
+                        tsType: true,
+                        description: 'Unique identifier for the user'
+                    },
+                    {
+                        name: 'name',
+                        value: 'string',
+                        tsType: true,
+                        description: 'Full name of the user',
+                        optional: true
+                    },
+                    {
+                        name: 'email',
+                        value: 'string',
+                        tsType: true,
+                        description: 'Email address of the user'
+                    }
+                ]
+            }
+        ];
+        const res = buildModelsTS({
+            parsed: {
+                yamlVersion: 'v2',
+                models: new Map(Object.entries(models)),
+                integrations: []
+            }
+        });
+
+        // Extract the models section
+        const modelsSection = res.split('// ------ Models')[1]?.split('// ------ /Models')[0]?.trim();
+        expect(modelsSection).toBeDefined();
+
+        const expectedOutput = [
+            '/**',
+            ' * Represents a user in the system',
+            ' */',
+            'export interface User {',
+            '  /**',
+            '   * Dynamic string field for additional properties',
+            '   */',
+            '  [key: string]: string;',
+            '  /**',
+            '   * Unique identifier for the user',
+            '   */',
+            '  id: number;',
+            '  /**',
+            '   * Full name of the user',
+            '   */',
+            '  name?: string | undefined;',
+            '  /**',
+            '   * Email address of the user',
+            '   */',
+            '  email: string;',
+            '};'
+        ].join('\n');
+
+        expect(modelsSection).toBe(expectedOutput);
     });
 });
 
@@ -176,20 +248,5 @@ describe('fieldToTypescript', () => {
                 }
             })
         ).toStrictEqual('User[] | string');
-    });
-});
-
-describe('generate exports', () => {
-    describe('json', () => {
-        it('should export to JSON', () => {
-            const folderTS = path.join(os.tmpdir(), 'cli-exports-json');
-            fs.rmSync(folderTS, { recursive: true, force: true });
-            fs.mkdirSync(folderTS, { recursive: true });
-            const pathTS = path.join(folderTS, 'schema.ts');
-            fs.writeFileSync(pathTS, `export interface Test { id: string; name: number[]; }`);
-
-            const res = getExportToJSON({ pathTS });
-            expect(removeVersion(JSON.stringify(res, null, 2))).toMatchSnapshot();
-        });
     });
 });

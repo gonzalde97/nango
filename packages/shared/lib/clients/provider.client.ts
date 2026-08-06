@@ -1,13 +1,23 @@
+import { randomUUID } from 'crypto';
+
 import braintree from 'braintree';
 import qs from 'qs';
 
-import { axiosInstance as axios, getLogger, stringifyError } from '@nangohq/utils';
+import { axiosInstance, getLogger, stringifyError } from '@nangohq/utils';
 
+import { assertSafeOAuthUrl, getOAuthAxiosRequestConfig } from '../services/proxy/outbound-policy.js';
 import { NangoError } from '../utils/error.js';
 import { isTokenExpired, makeUrl, parseTokenExpirationDate } from '../utils/utils.js';
 
 import type { Config as ProviderConfig } from '../models/index.js';
-import type { AuthorizationTokenResponse, ConnectionConfig, DBConnectionDecrypted, ProviderOAuth2, RefreshTokenResponse } from '@nangohq/types';
+import type {
+    AuthorizationTokenResponse,
+    ConnectionConfig,
+    DBConnectionDecrypted,
+    OAuth2Credentials,
+    ProviderOAuth2,
+    RefreshTokenResponse
+} from '@nangohq/types';
 
 const stripeAppExpiresIn = 3600;
 const corosExpiresIn = 2592000;
@@ -15,12 +25,23 @@ const workdayOauthExpiresIn = 3600;
 const bullhornExpiresInMinutes = 10080;
 const bullhornLoginUrl = 'https://rest-west.bullhornstaffing.com/rest-services/login';
 const jobberExpiresIn = 3600;
+const instagramExpiresIn = 3600;
+const instagramLongLivedTokenUrl = 'https://graph.instagram.com/access_token';
+const threadsExpiresIn = 3600;
+const threadsLongLivedTokenUrl = 'https://graph.threads.net/access_token';
 
 const logger = getLogger('Provider.Client');
+
+const axios = {
+    post: (url: string, data?: unknown, config?: Parameters<typeof axiosInstance.post>[2]) =>
+        axiosInstance.post(url, data, { ...config, ...getOAuthAxiosRequestConfig() }),
+    get: (url: string, config?: Parameters<typeof axiosInstance.get>[1]) => axiosInstance.get(url, { ...config, ...getOAuthAxiosRequestConfig() })
+};
 
 class ProviderClient {
     public shouldUseProviderClient(provider: string): boolean {
         switch (provider) {
+            case 'agiloft':
             case 'braintree':
             case 'braintree-sandbox':
             case 'bullhorn':
@@ -29,8 +50,11 @@ class ProviderClient {
             case 'figma':
             case 'figjam':
             case 'facebook':
+            case 'followupboss':
+            case 'instagram':
             case 'jobber':
             case 'microsoft-admin':
+            case 'microsoft-teams-bot':
             case 'one-drive':
             case 'sharepoint-online':
             case 'tiktok-ads':
@@ -41,6 +65,15 @@ class ProviderClient {
             case 'stripe-app-sandbox':
             case 'workday-oauth':
             case 'fanvue':
+            case 'heygen':
+            case 'mercury':
+            case 'clover':
+            case 'absorb-lms':
+            case 'posthog-oauth':
+            case 'walmart':
+            case 'slack':
+            case 'attio-mcp':
+            case 'threads':
                 return true;
             default:
                 return false;
@@ -50,16 +83,36 @@ class ProviderClient {
     public shouldIntrospectToken(provider: string): boolean {
         switch (provider) {
             case 'salesforce':
+            case 'salesforce-cc':
             case 'salesforce-sandbox':
             case 'salesforce-experience-cloud':
+            case 'salesforce-jwt':
                 return true;
             default:
                 return false;
         }
     }
 
-    public async getToken(config: ProviderConfig, tokenUrl: string, code: string, callBackUrl: string, codeVerifier: string): Promise<object> {
+    public async getToken(
+        config: ProviderConfig,
+        provider: ProviderOAuth2,
+        tokenUrl: string,
+        code: string,
+        callBackUrl: string,
+        codeVerifier: string,
+        connectionConfig?: Record<string, string>,
+        state?: string
+    ): Promise<object> {
+        try {
+            await assertSafeOAuthUrl(tokenUrl);
+        } catch (err) {
+            throw new NangoError('request_token_external_error', { message: err instanceof Error ? err.message : 'Outbound URL blocked by policy' });
+        }
         switch (config.provider) {
+            case 'attio-mcp':
+                return this.createAttioMcpToken(tokenUrl, code, config.oauth_client_id, callBackUrl, codeVerifier);
+            case 'agiloft':
+                return this.createAgiloftToken(tokenUrl, code, config.oauth_client_id, config.oauth_client_secret, callBackUrl);
             case 'braintree':
             case 'braintree-sandbox':
                 return this.createBraintreeToken(code, config.oauth_client_id, config.oauth_client_secret);
@@ -71,15 +124,23 @@ class ProviderClient {
             case 'figma':
             case 'figjam':
                 return this.createFigmaToken(tokenUrl, code, config.oauth_client_id, config.oauth_client_secret, callBackUrl);
+            case 'followupboss':
+                return this.createFollowupbossToken(tokenUrl, code, config.oauth_client_id, config.oauth_client_secret, callBackUrl, state);
             case 'jobber':
                 return this.createJobberToken(tokenUrl, code, config.oauth_client_id, config.oauth_client_secret);
             case 'facebook':
                 return this.createFacebookToken(tokenUrl, code, config.oauth_client_id, config.oauth_client_secret, callBackUrl, codeVerifier);
+            case 'instagram':
+                return this.createInstagramToken(tokenUrl, code, config.oauth_client_id, config.oauth_client_secret, callBackUrl);
+            case 'threads':
+                return this.createThreadsToken(tokenUrl, code, config.oauth_client_id, config.oauth_client_secret, callBackUrl);
             case 'tiktok-ads':
                 return this.createTiktokAdsToken(tokenUrl, code, config.oauth_client_id, config.oauth_client_secret);
             case 'one-drive':
             case 'sharepoint-online':
                 return this.createSharepointToken(tokenUrl, code, config.oauth_client_id, config.oauth_client_secret, callBackUrl);
+            case 'microsoft-teams-bot':
+                return this.createMicrosoftTeamsBotToken(tokenUrl, code, config.oauth_client_id, config.oauth_client_secret, callBackUrl);
             case 'microsoft-admin':
                 return this.createMicrosoftAdminToken(tokenUrl, config.oauth_client_id, config.oauth_client_secret, config.oauth_scopes);
             case 'sentry-oauth':
@@ -95,6 +156,38 @@ class ProviderClient {
                 return this.createWorkdayOauthAccessToken(tokenUrl, code, config.oauth_client_id, config.oauth_client_secret, callBackUrl, codeVerifier);
             case 'fanvue':
                 return this.createFanvueToken(tokenUrl, code, config.oauth_client_id, config.oauth_client_secret, callBackUrl, codeVerifier);
+            case 'heygen':
+                return this.createHeyGenToken(tokenUrl, code, config.oauth_client_id, callBackUrl, codeVerifier);
+            case 'mercury':
+                return this.createMercuryToken(tokenUrl, code, callBackUrl, codeVerifier);
+            case 'clover':
+                return this.createCloverToken(tokenUrl, code, config.oauth_client_id, config.oauth_client_secret);
+            case 'absorb-lms':
+                return this.createAbsorbLmsToken(
+                    tokenUrl,
+                    code,
+                    config.oauth_client_id,
+                    config.oauth_client_secret,
+                    callBackUrl,
+                    connectionConfig?.['restApiKey'],
+                    connectionConfig?.['apiVersion']
+                );
+            case 'posthog-oauth':
+                return this.createPosthogOauthToken(tokenUrl, code, config.oauth_client_id, callBackUrl, codeVerifier);
+            case 'walmart': {
+                const sellerId = connectionConfig?.['sellerId'];
+                if (!sellerId) throw new NangoError('missing_walmart_seller_id');
+                return this.createWalmartToken(tokenUrl, code, config.oauth_client_id, config.oauth_client_secret, callBackUrl, sellerId);
+            }
+            case 'slack':
+                return this.createSlackToken(
+                    tokenUrl,
+                    code,
+                    config.oauth_client_id,
+                    config.oauth_client_secret,
+                    callBackUrl,
+                    provider.alternate_access_token_response_path
+                );
             default:
                 throw new NangoError('unknown_provider_client');
         }
@@ -107,14 +200,32 @@ class ProviderClient {
 
         const credentials = connection.credentials;
         const interpolatedTokenUrl = makeUrl(provider.token_url as string, connection.connection_config);
+        const interpolatedRefreshUrl = provider.refresh_url ? makeUrl(provider.refresh_url, connection.connection_config) : null;
 
-        if (config.provider !== 'facebook' && !credentials.refresh_token && config.provider !== 'microsoft-admin') {
+        try {
+            await assertSafeOAuthUrl(interpolatedTokenUrl.href);
+            if (interpolatedRefreshUrl) {
+                await assertSafeOAuthUrl(interpolatedRefreshUrl.href);
+            }
+        } catch (err) {
+            throw new NangoError('refresh_token_external_error', { message: err instanceof Error ? err.message : 'Outbound URL blocked by policy' });
+        }
+
+        if (
+            config.provider !== 'facebook' &&
+            !credentials.refresh_token &&
+            config.provider !== 'microsoft-admin' &&
+            config.provider !== 'instagram' &&
+            config.provider !== 'threads'
+        ) {
             throw new NangoError('missing_refresh_token');
-        } else if (config.provider === 'facebook' && !credentials.access_token) {
-            throw new NangoError('missing_facebook_access_token');
+        } else if ((config.provider === 'facebook' || config.provider === 'instagram' || config.provider === 'threads') && !credentials.access_token) {
+            throw new NangoError('missing_access_token');
         }
 
         switch (config.provider) {
+            case 'agiloft':
+                return this.refreshAgiloftToken(interpolatedTokenUrl.href, credentials.refresh_token!, config.oauth_client_secret);
             case 'bullhorn':
                 return this.refreshBullhornSession(
                     provider.token_url as string,
@@ -137,10 +248,16 @@ class ProviderClient {
             case 'figma':
             case 'figjam':
                 return this.refreshFigmaToken(provider.refresh_url as string, credentials.refresh_token!, config.oauth_client_id, config.oauth_client_secret);
+            case 'followupboss':
+                return this.refreshFollowupbossToken(interpolatedTokenUrl.href, credentials.refresh_token!, config.oauth_client_id, config.oauth_client_secret);
             case 'jobber':
                 return this.refreshJobberToken(provider.token_url as string, credentials.refresh_token!, config.oauth_client_id, config.oauth_client_secret);
             case 'facebook':
                 return this.refreshFacebookToken(provider.token_url as string, credentials.access_token, config.oauth_client_id, config.oauth_client_secret);
+            case 'instagram':
+                return this.refreshInstagramToken(provider.refresh_url as string, credentials.access_token);
+            case 'threads':
+                return this.refreshThreadsToken(provider.refresh_url as string, credentials.access_token);
             case 'one-drive':
             case 'sharepoint-online':
                 return this.refreshSharepointToken(
@@ -150,6 +267,8 @@ class ProviderClient {
                     config.oauth_client_secret,
                     connection.connection_config
                 );
+            case 'microsoft-teams-bot':
+                return this.refreshMicrosoftTeamsBotToken(interpolatedTokenUrl.href, config.oauth_client_id, config.oauth_client_secret, connection);
             case 'microsoft-admin':
                 return this.refreshMicrosoftAdminToken(interpolatedTokenUrl.href, config.oauth_client_id, config.oauth_client_secret, config.oauth_scopes);
             case 'tiktok-accounts':
@@ -181,35 +300,140 @@ class ProviderClient {
                     interpolatedTokenUrl.href,
                     credentials.refresh_token!,
                     config.oauth_client_id,
-                    config.oauth_client_secret
+                    config.oauth_client_secret,
+                    connection.connection_config
                 );
             case 'fanvue':
                 return this.refreshFanvueToken(interpolatedTokenUrl.href, credentials.refresh_token!, config.oauth_client_id, config.oauth_client_secret);
+            case 'mercury':
+                return this.refreshMercuryToken(interpolatedTokenUrl.href, credentials.refresh_token!);
+            case 'clover':
+                return this.refreshCloverToken(interpolatedRefreshUrl!.href, credentials.refresh_token!, config.oauth_client_id);
+            case 'heygen':
+                return this.refreshHeyGenToken(provider.refresh_url as string, credentials.refresh_token!, config.oauth_client_id);
+            case 'absorb-lms':
+                return this.refreshAbsorbLmsToken(
+                    interpolatedTokenUrl.href,
+                    credentials.refresh_token!,
+                    config.oauth_client_id,
+                    config.oauth_client_secret,
+                    connection.connection_config,
+                    config.oauth_scopes ?? '',
+                    connection.connection_config['apiVersion']
+                );
+            case 'posthog-oauth':
+                return this.refreshPosthogOauthToken(interpolatedTokenUrl.href, credentials.refresh_token!, config.oauth_client_id);
+            case 'walmart': {
+                const sellerId = connection.connection_config['sellerId'];
+                if (!sellerId) throw new NangoError('missing_walmart_seller_id');
+                return this.refreshWalmartToken(
+                    interpolatedTokenUrl.href,
+                    credentials.refresh_token!,
+                    config.oauth_client_id,
+                    config.oauth_client_secret,
+                    sellerId
+                );
+            }
+            case 'slack':
+                return this.refreshSlackToken(
+                    interpolatedTokenUrl.href,
+                    config.oauth_client_id,
+                    config.oauth_client_secret,
+                    connection,
+                    provider.alternate_access_token_response_path
+                );
+            case 'attio-mcp':
+                return this.refreshAttioMcpToken(interpolatedTokenUrl.href, credentials.refresh_token!, config.oauth_client_id);
             default:
                 throw new NangoError('unknown_provider_client');
         }
     }
 
     public async introspectedTokenExpired(config: ProviderConfig, connection: DBConnectionDecrypted): Promise<boolean> {
-        if (connection.credentials.type !== 'OAUTH2') {
-            throw new NangoError('wrong_credentials_type');
+        const { credentials } = connection;
+
+        if (credentials.type === 'OAUTH2' && (credentials.config_override?.client_id || credentials.config_override?.client_secret)) {
+            config = {
+                ...config,
+                ...(credentials.config_override.client_id && { oauth_client_id: credentials.config_override.client_id }),
+                ...(credentials.config_override.client_secret && { oauth_client_secret: credentials.config_override.client_secret })
+            };
         }
 
-        const credentials = connection.credentials;
-        const oauthConnection = connection;
+        function resolveByType(): { accessToken: string; clientId: string; clientSecret: string } {
+            switch (credentials.type) {
+                case 'OAUTH2':
+                    return { accessToken: credentials.access_token, clientId: config.oauth_client_id, clientSecret: config.oauth_client_secret };
+                case 'TWO_STEP':
+                    return { accessToken: credentials.token!, clientId: credentials['clientId'], clientSecret: credentials['clientSecret'] };
+                case 'OAUTH2_CC':
+                    return { accessToken: credentials.token, clientId: credentials.client_id, clientSecret: credentials.client_secret };
+                default:
+                    throw new NangoError('wrong_credentials_type');
+            }
+        }
+
+        const connectionConfig = connection.connection_config as Record<string, string>;
+        const { accessToken, clientId, clientSecret } = resolveByType();
+
+        if (!accessToken) throw new NangoError('access_token_missing');
+        if (!clientId || !clientSecret) throw new NangoError('client_credentials_missing');
 
         switch (config.provider) {
             case 'salesforce':
+            case 'salesforce-cc':
             case 'salesforce-sandbox':
             case 'salesforce-experience-cloud':
-                return this.introspectedSalesforceTokenExpired(
-                    credentials.access_token,
-                    config.oauth_client_id,
-                    config.oauth_client_secret,
-                    oauthConnection.connection_config as Record<string, string>
-                );
+            case 'salesforce-jwt':
+                return this.introspectedSalesforceTokenExpired(accessToken, clientId, clientSecret, connectionConfig);
             default:
                 throw new NangoError('unknown_provider_client');
+        }
+    }
+
+    private async createAgiloftToken(
+        tokenUrl: string,
+        code: string,
+        clientId: string,
+        clientSecret: string,
+        redirectUri: string
+    ): Promise<AuthorizationTokenResponse> {
+        try {
+            const body = new URLSearchParams({
+                grant_type: 'authorization_code',
+                code,
+                client_id: clientId,
+                redirect_uri: redirectUri
+            });
+            const response = await axios.post(tokenUrl, body.toString(), {
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                auth: { username: clientId, password: clientSecret }
+            });
+            if (response.status === 200 && response.data) {
+                return { ...response.data };
+            }
+            throw new NangoError('agiloft_token_request_error', response.data);
+        } catch (err: any) {
+            throw new NangoError('agiloft_token_request_error', stringifyError(err));
+        }
+    }
+
+    private async refreshAgiloftToken(tokenUrl: string, refreshToken: string, clientSecret: string): Promise<RefreshTokenResponse> {
+        try {
+            const body = new URLSearchParams({
+                grant_type: 'refresh_token',
+                refresh_token: refreshToken,
+                md5_secret: clientSecret.substring(0, 20)
+            });
+            const response = await axios.post(tokenUrl, body.toString(), {
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+            });
+            if (response.status === 200 && response.data) {
+                return { ...response.data, refresh_token: refreshToken };
+            }
+            throw new NangoError('agiloft_refresh_token_request_error', response.data);
+        } catch (err: any) {
+            throw new NangoError('agiloft_refresh_token_request_error', stringifyError(err));
         }
     }
 
@@ -292,6 +516,52 @@ class ProviderClient {
         }
     }
 
+    private async createFollowupbossToken(
+        tokenUrl: string,
+        code: string,
+        clientId: string,
+        clientSecret: string,
+        redirectUri: string,
+        state?: string
+    ): Promise<object> {
+        const body: Record<string, string> = {
+            grant_type: 'authorization_code',
+            code,
+            redirect_uri: redirectUri
+        };
+        if (state) {
+            body['state'] = state;
+        }
+        const auth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+        try {
+            const response = await axios.post(tokenUrl, qs.stringify(body), {
+                headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' }
+            });
+            if (response.status === 200 && response.data) {
+                return response.data;
+            }
+            throw new NangoError('followupboss_token_request_error', response.data);
+        } catch (err: any) {
+            throw new NangoError('followupboss_token_request_error', stringifyError(err));
+        }
+    }
+
+    private async refreshFollowupbossToken(tokenUrl: string, refreshToken: string, clientId: string, clientSecret: string): Promise<RefreshTokenResponse> {
+        const body = { grant_type: 'refresh_token', refresh_token: refreshToken };
+        const auth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+        try {
+            const response = await axios.post(tokenUrl, qs.stringify(body), {
+                headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' }
+            });
+            if (response.status === 200 && response.data) {
+                return response.data;
+            }
+            throw new NangoError('followupboss_refresh_token_request_error', response.data);
+        } catch (err: any) {
+            throw new NangoError('followupboss_refresh_token_request_error', stringifyError(err));
+        }
+    }
+
     private async createSentryOauthToken(tokenUrl: string, code: string, client_id: string, client_secret: string): Promise<object> {
         try {
             const body = {
@@ -316,7 +586,7 @@ class ProviderClient {
 
             throw new NangoError('sentry_oauth_token_request_error', response.data);
         } catch (err: any) {
-            throw new NangoError('sentry_oauth_token_request_error', err);
+            throw new NangoError('sentry_oauth_token_request_error', stringifyError(err));
         }
     }
 
@@ -358,7 +628,7 @@ class ProviderClient {
 
             throw new NangoError('bullhorn_session_request_error', { cause: response.data });
         } catch (err: any) {
-            throw new NangoError('bullhorn_session_request_error', { cause: err });
+            throw new NangoError('bullhorn_session_request_error', { cause: stringifyError(err) });
         }
     }
 
@@ -400,7 +670,7 @@ class ProviderClient {
 
             throw new NangoError('bullhorn_session_refresh_error', { cause: response.data });
         } catch (err: any) {
-            throw new NangoError('bullhorn_session_refresh_error', { cause: err });
+            throw new NangoError('bullhorn_session_refresh_error', { cause: stringifyError(err) });
         }
     }
 
@@ -427,7 +697,7 @@ class ProviderClient {
 
             throw new NangoError('jobber_token_request_error', response.data);
         } catch (err: any) {
-            throw new NangoError('jobber_token_request_error', err);
+            throw new NangoError('jobber_token_request_error', stringifyError(err));
         }
     }
 
@@ -455,7 +725,7 @@ class ProviderClient {
 
             throw new NangoError('jobber_refresh_token_request_error', response.data);
         } catch (err: any) {
-            throw new NangoError('jobber_refresh_token_request_error', err);
+            throw new NangoError('jobber_refresh_token_request_error', stringifyError(err));
         }
     }
 
@@ -483,7 +753,7 @@ class ProviderClient {
 
             throw new NangoError('sentry_oauth_refresh_token_request_error', response.data);
         } catch (err: any) {
-            throw new NangoError('sentry_oauth_refresh_token_request_error', err);
+            throw new NangoError('sentry_oauth_refresh_token_request_error', stringifyError(err));
         }
     }
 
@@ -701,6 +971,152 @@ class ProviderClient {
         throw new NangoError('facebook_refresh_token_request_error');
     }
 
+    private async createInstagramToken(
+        tokenUrl: string,
+        code: string,
+        clientId: string,
+        clientSecret: string,
+        redirectUri: string
+    ): Promise<AuthorizationTokenResponse> {
+        try {
+            const headers = {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            };
+
+            const body = {
+                client_id: clientId,
+                client_secret: clientSecret,
+                grant_type: 'authorization_code',
+                redirect_uri: redirectUri,
+                code
+            };
+
+            const response = await axios.post(tokenUrl, body, { headers });
+
+            if (response.status === 200 && response.data) {
+                // Exchange short-lived (24hr) token for long-lived (60 days) token
+                const exchangeQueryParams = {
+                    grant_type: 'ig_exchange_token',
+                    access_token: response.data['access_token'],
+                    client_secret: clientSecret
+                };
+                const exchangeUrl = `${instagramLongLivedTokenUrl}?${qs.stringify(exchangeQueryParams)}`;
+
+                const exchangeResponse = await axios.get(exchangeUrl);
+
+                if (exchangeResponse.status === 200 && exchangeResponse.data) {
+                    return {
+                        ...exchangeResponse.data
+                    };
+                }
+
+                return {
+                    ...response.data,
+                    expires_in: instagramExpiresIn
+                };
+            }
+
+            throw new NangoError('instagram_token_request_error');
+        } catch (err: any) {
+            throw new NangoError('instagram_token_request_error', stringifyError(err));
+        }
+    }
+
+    private async refreshInstagramToken(refreshTokenUrl: string, accessToken: string): Promise<RefreshTokenResponse> {
+        try {
+            const queryParams = {
+                grant_type: 'ig_refresh_token',
+                access_token: accessToken
+            };
+
+            const urlWithParams = `${refreshTokenUrl}?${qs.stringify(queryParams)}`;
+            const response = await axios.get(urlWithParams);
+
+            if (response.status === 200 && response.data) {
+                return {
+                    ...response.data
+                };
+            }
+
+            throw new NangoError('instagram_refresh_token_request_error', response.data);
+        } catch (err: any) {
+            throw new NangoError('instagram_refresh_token_request_error', stringifyError(err));
+        }
+    }
+
+    private async createThreadsToken(
+        tokenUrl: string,
+        code: string,
+        clientId: string,
+        clientSecret: string,
+        redirectUri: string
+    ): Promise<AuthorizationTokenResponse> {
+        try {
+            const headers = {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            };
+
+            const body = {
+                client_id: clientId,
+                client_secret: clientSecret,
+                grant_type: 'authorization_code',
+                redirect_uri: redirectUri,
+                code
+            };
+
+            const response = await axios.post(tokenUrl, body, { headers });
+
+            if (response.status === 200 && response.data) {
+                // Exchange short-lived (1hr) token for long-lived (60 days) token
+                const exchangeQueryParams = {
+                    grant_type: 'th_exchange_token',
+                    access_token: response.data['access_token'],
+                    client_secret: clientSecret
+                };
+                const exchangeUrl = `${threadsLongLivedTokenUrl}?${qs.stringify(exchangeQueryParams)}`;
+
+                const exchangeResponse = await axios.get(exchangeUrl);
+
+                if (exchangeResponse.status === 200 && exchangeResponse.data) {
+                    return {
+                        ...exchangeResponse.data
+                    };
+                }
+
+                return {
+                    ...response.data,
+                    expires_in: threadsExpiresIn
+                };
+            }
+
+            throw new NangoError('threads_token_request_error');
+        } catch (err: any) {
+            throw new NangoError('threads_token_request_error', stringifyError(err));
+        }
+    }
+
+    private async refreshThreadsToken(refreshTokenUrl: string, accessToken: string): Promise<RefreshTokenResponse> {
+        try {
+            const queryParams = {
+                grant_type: 'th_refresh_token',
+                access_token: accessToken
+            };
+
+            const urlWithParams = `${refreshTokenUrl}?${qs.stringify(queryParams)}`;
+            const response = await axios.get(urlWithParams);
+
+            if (response.status === 200 && response.data) {
+                return {
+                    ...response.data
+                };
+            }
+
+            throw new NangoError('threads_refresh_token_request_error', response.data);
+        } catch (err: any) {
+            throw new NangoError('threads_refresh_token_request_error', stringifyError(err));
+        }
+    }
+
     private async createBraintreeToken(code: string, clientId: string, clientSecret: string): Promise<object> {
         const gateway = new braintree.BraintreeGateway({ clientId: clientId, clientSecret: clientSecret });
         const res = await gateway.oauth.createTokenFromCode({ code: code });
@@ -846,7 +1262,8 @@ class ProviderClient {
         refreshTokenUrl: string,
         refreshToken: string,
         client_id: string,
-        client_secret: string
+        client_secret: string,
+        connectionConfig: ConnectionConfig
     ): Promise<RefreshTokenResponse> {
         try {
             const body = {
@@ -860,8 +1277,9 @@ class ProviderClient {
 
             const response = await axios.post(refreshTokenUrl, body, { headers: headers });
             if (response.status === 200 && response.data) {
+                const refreshTokenToUse = connectionConfig['overrideTokenRefresh'] ? refreshToken : response.data['refresh_token'];
                 return {
-                    refresh_token: response.data['refresh_token'],
+                    refresh_token: refreshTokenToUse,
                     access_token: response.data['access_token'],
                     expires_in: workdayOauthExpiresIn
                 };
@@ -927,6 +1345,338 @@ class ProviderClient {
             throw new NangoError('fanvue_refresh_token_request_error');
         } catch (err: any) {
             throw new NangoError('fanvue_refresh_token_request_error', stringifyError(err));
+        }
+    }
+
+    private async createMercuryToken(tokenUrl: string, code: string, redirect_uri: string, code_verifier: string): Promise<AuthorizationTokenResponse> {
+        try {
+            const body = new URLSearchParams({
+                code,
+                grant_type: 'authorization_code',
+                redirect_uri,
+                code_verifier
+            });
+
+            const headers = {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            };
+
+            const response = await axios.post(tokenUrl, body.toString(), { headers });
+
+            if (response.status === 200 && response.data) {
+                return {
+                    ...response.data
+                };
+            }
+
+            throw new NangoError('mercury_token_request_error');
+        } catch (err: any) {
+            throw new NangoError('mercury_token_request_error', stringifyError(err));
+        }
+    }
+
+    private async refreshMercuryToken(tokenUrl: string, refreshToken: string): Promise<RefreshTokenResponse> {
+        try {
+            const body = new URLSearchParams({
+                grant_type: 'refresh_token',
+                refresh_token: refreshToken
+            });
+
+            const headers = {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            };
+
+            const response = await axios.post(tokenUrl, body.toString(), { headers });
+
+            if (response.status === 200 && response.data) {
+                return {
+                    ...response.data
+                };
+            }
+            throw new NangoError('mercury_refresh_token_request_error');
+        } catch (err: any) {
+            throw new NangoError('mercury_refresh_token_request_error', stringifyError(err));
+        }
+    }
+
+    private async createCloverToken(tokenUrl: string, code: string, client_id: string, client_secret: string): Promise<AuthorizationTokenResponse> {
+        try {
+            const response = await axios.post(tokenUrl, { client_id, client_secret, code }, { headers: { 'Content-Type': 'application/json' } });
+
+            if (response.status === 200 && response.data) {
+                const { access_token_expiration, ...rest } = response.data;
+                return {
+                    ...rest,
+                    expires_at: access_token_expiration
+                };
+            }
+
+            throw new NangoError('clover_token_request_error');
+        } catch (err: any) {
+            throw new NangoError('clover_token_request_error', stringifyError(err));
+        }
+    }
+
+    private async refreshCloverToken(refreshUrl: string, refresh_token: string, client_id: string): Promise<RefreshTokenResponse> {
+        try {
+            const response = await axios.post(refreshUrl, { client_id, refresh_token }, { headers: { 'Content-Type': 'application/json' } });
+
+            if (response.status === 200 && response.data) {
+                const { access_token_expiration, ...rest } = response.data;
+                return {
+                    ...rest,
+                    expires_at: access_token_expiration
+                };
+            }
+
+            throw new NangoError('clover_refresh_token_request_error');
+        } catch (err: any) {
+            throw new NangoError('clover_refresh_token_request_error', stringifyError(err));
+        }
+    }
+
+    private async createHeyGenToken(
+        tokenUrl: string,
+        code: string,
+        client_id: string,
+        redirect_uri: string,
+        code_verifier: string
+    ): Promise<AuthorizationTokenResponse> {
+        try {
+            const body = new URLSearchParams({
+                code,
+                client_id,
+                grant_type: 'authorization_code',
+                redirect_uri,
+                code_verifier
+            });
+
+            const headers = {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            };
+
+            const response = await axios.post(tokenUrl, body.toString(), { headers });
+
+            if (response.status === 200 && response.data) {
+                return {
+                    ...response.data
+                };
+            }
+
+            throw new NangoError('heygen_token_request_error');
+        } catch (err: any) {
+            throw new NangoError('heygen_token_request_error', stringifyError(err));
+        }
+    }
+
+    private async refreshHeyGenToken(refreshTokenUrl: string, refreshToken: string, client_id: string): Promise<RefreshTokenResponse> {
+        try {
+            const body = new URLSearchParams({
+                client_id,
+                grant_type: 'refresh_token',
+                refresh_token: refreshToken
+            });
+
+            const headers = {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            };
+
+            const response = await axios.post(refreshTokenUrl, body.toString(), { headers });
+
+            if (response.status === 200 && response.data) {
+                return {
+                    ...response.data
+                };
+            }
+            throw new NangoError('heygen_refresh_token_request_error');
+        } catch (err: any) {
+            throw new NangoError('heygen_refresh_token_request_error', stringifyError(err));
+        }
+    }
+
+    private async createAbsorbLmsToken(
+        tokenUrl: string,
+        code: string,
+        client_id: string,
+        client_secret: string,
+        redirect_uri: string,
+        restApiKey: string | undefined,
+        apiVersion: string | undefined
+    ): Promise<AuthorizationTokenResponse> {
+        if (!restApiKey) throw new NangoError('missing_connection_config', { config: 'restApiKey' });
+        if (!apiVersion) throw new NangoError('missing_connection_config', { config: 'apiVersion' });
+        try {
+            const body = new URLSearchParams({
+                grant_type: 'authorization_code',
+                client_id,
+                client_secret,
+                code,
+                redirect_uri,
+                nonce: crypto.randomUUID()
+            });
+            const headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'x-api-version': apiVersion,
+                'x-api-key': restApiKey
+            };
+            const response = await axios.post(tokenUrl, body.toString(), { headers });
+            if (response.status >= 200 && response.status < 300 && response.data) return { ...response.data };
+            throw new NangoError('absorb_lms_token_request_error');
+        } catch (err: any) {
+            throw new NangoError('absorb_lms_token_request_error', stringifyError(err));
+        }
+    }
+
+    private async refreshAbsorbLmsToken(
+        tokenUrl: string,
+        refreshToken: string,
+        client_id: string,
+        client_secret: string,
+        connection_config: ConnectionConfig,
+        scope: string,
+        apiVersion: string | undefined
+    ): Promise<RefreshTokenResponse> {
+        const restApiKey = connection_config['restApiKey'];
+        if (!restApiKey) throw new NangoError('missing_connection_config', { config: 'restApiKey' });
+        if (!apiVersion) throw new NangoError('missing_connection_config', { config: 'apiVersion' });
+        try {
+            const body = new URLSearchParams({
+                grant_type: 'refresh_token',
+                client_id,
+                client_secret,
+                refresh_token: refreshToken,
+                nonce: crypto.randomUUID(),
+                scope
+            });
+            const headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'x-api-version': apiVersion,
+                'x-api-key': restApiKey
+            };
+            const response = await axios.post(tokenUrl, body.toString(), { headers });
+            if (response.status >= 200 && response.status < 300 && response.data) return { ...response.data };
+            throw new NangoError('absorb_lms_refresh_token_request_error');
+        } catch (err: any) {
+            throw new NangoError('absorb_lms_refresh_token_request_error', stringifyError(err));
+        }
+    }
+
+    private async createPosthogOauthToken(
+        tokenUrl: string,
+        code: string,
+        client_id: string,
+        redirect_uri: string,
+        code_verifier: string
+    ): Promise<AuthorizationTokenResponse> {
+        try {
+            const body = new URLSearchParams({
+                code,
+                client_id,
+                grant_type: 'authorization_code',
+                redirect_uri,
+                code_verifier
+            });
+
+            const headers = {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            };
+
+            const response = await axios.post(tokenUrl, body.toString(), { headers });
+
+            if (response.status === 200 && response.data) {
+                return {
+                    ...response.data
+                };
+            }
+
+            throw new NangoError('posthog_oauth_token_request_error');
+        } catch (err: any) {
+            throw new NangoError('posthog_oauth_token_request_error', stringifyError(err));
+        }
+    }
+
+    private async refreshPosthogOauthToken(tokenUrl: string, refreshToken: string, client_id: string): Promise<RefreshTokenResponse> {
+        try {
+            const body = new URLSearchParams({
+                client_id,
+                grant_type: 'refresh_token',
+                refresh_token: refreshToken
+            });
+
+            const headers = {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            };
+
+            const response = await axios.post(tokenUrl, body.toString(), { headers });
+
+            if (response.status === 200 && response.data) {
+                return {
+                    ...response.data
+                };
+            }
+            throw new NangoError('posthog_oauth_refresh_token_request_error');
+        } catch (err: any) {
+            throw new NangoError('posthog_oauth_refresh_token_request_error', stringifyError(err));
+        }
+    }
+
+    private walmartHeaders(clientId: string, clientSecret: string, sellerId: string): Record<string, string> {
+        return {
+            Authorization: 'Basic ' + Buffer.from(clientId + ':' + clientSecret).toString('base64'),
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'WM_SVC.name': 'Walmart Marketplace',
+            'WM_QOS.CORRELATION_ID': randomUUID(),
+            'WM_PARTNER.id': sellerId
+        };
+    }
+
+    private async createWalmartToken(
+        tokenUrl: string,
+        code: string,
+        clientId: string,
+        clientSecret: string,
+        redirectUri: string,
+        sellerId: string
+    ): Promise<AuthorizationTokenResponse> {
+        try {
+            const body = new URLSearchParams({
+                grant_type: 'authorization_code',
+                code,
+                redirect_uri: redirectUri
+            });
+
+            const response = await axios.post(tokenUrl, body.toString(), { headers: this.walmartHeaders(clientId, clientSecret, sellerId) });
+
+            if (response.status === 200 && response.data) {
+                return response.data;
+            }
+            throw new NangoError('request_token_external_error', response.data);
+        } catch (err: any) {
+            throw new NangoError('request_token_external_error', stringifyError(err));
+        }
+    }
+
+    private async refreshWalmartToken(
+        tokenUrl: string,
+        refreshToken: string,
+        clientId: string,
+        clientSecret: string,
+        sellerId: string
+    ): Promise<RefreshTokenResponse> {
+        try {
+            const body = new URLSearchParams({
+                grant_type: 'refresh_token',
+                refresh_token: refreshToken
+            });
+
+            const response = await axios.post(tokenUrl, body.toString(), { headers: this.walmartHeaders(clientId, clientSecret, sellerId) });
+
+            if (response.status === 200 && response.data) {
+                return { ...response.data, refresh_token: refreshToken };
+            }
+            throw new NangoError('refresh_token_external_error', response.data);
+        } catch (err: any) {
+            throw new NangoError('refresh_token_external_error', stringifyError(err));
         }
     }
 
@@ -1005,6 +1755,40 @@ class ProviderClient {
         }
     }
 
+    private async createMicrosoftTeamsBotToken(
+        tokenUrl: string,
+        code: string,
+        clientId: string,
+        clientSecret: string,
+        redirectUri: string
+    ): Promise<AuthorizationTokenResponse> {
+        try {
+            const headers = {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            };
+
+            const body = {
+                client_id: clientId,
+                client_secret: clientSecret,
+                code: code,
+                redirect_uri: redirectUri,
+                grant_type: 'authorization_code'
+            };
+
+            const response = await axios.post(tokenUrl, body, { headers });
+
+            if (response.status === 200 && response.data) {
+                return {
+                    ...response.data
+                };
+            }
+
+            throw new NangoError('microsoft_teams_bot_token_request_error', response.data);
+        } catch (err: any) {
+            throw new NangoError('microsoft_teams_bot_token_request_error', stringifyError(err));
+        }
+    }
+
     private async refreshSharepointToken(
         tokenUrl: string,
         refreshToken: string,
@@ -1070,6 +1854,171 @@ class ProviderClient {
         }
     }
 
+    private pickMinExpiresIn(primary: Record<string, any>, secondary?: Record<string, any>): number | undefined {
+        const primaryExpiresIn = Number(primary['expires_in']) || undefined;
+        const secondaryExpiresIn = secondary ? Number(secondary['expires_in']) || undefined : undefined;
+        return primaryExpiresIn !== undefined && secondaryExpiresIn !== undefined
+            ? Math.min(primaryExpiresIn, secondaryExpiresIn)
+            : (primaryExpiresIn ?? secondaryExpiresIn);
+    }
+
+    private async createSlackToken(
+        tokenUrl: string,
+        code: string,
+        clientId: string,
+        clientSecret: string,
+        redirectUri: string,
+        alternateTokenPath?: string
+    ): Promise<object> {
+        try {
+            const body = new URLSearchParams({
+                client_id: clientId,
+                client_secret: clientSecret,
+                code,
+                redirect_uri: redirectUri,
+                grant_type: 'authorization_code'
+            });
+            const response = await axios.post(tokenUrl, body.toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+            if (response.status === 200 && response.data) {
+                const data = response.data as Record<string, any>;
+                if (data['ok'] === false) {
+                    throw new NangoError('slack_token_request_error', data['error'] ?? 'token_request_failed');
+                }
+                const secondary = alternateTokenPath ? (data[alternateTokenPath] as Record<string, any> | undefined) : undefined;
+                const minExpiresIn = this.pickMinExpiresIn(data, secondary);
+                return { ...data, ...(minExpiresIn !== undefined && { expires_in: minExpiresIn }) };
+            }
+            throw new NangoError('slack_token_request_error', response.data);
+        } catch (err: any) {
+            throw new NangoError('slack_token_request_error', err.message);
+        }
+    }
+
+    private async refreshSlackToken(
+        tokenUrl: string,
+        clientId: string,
+        clientSecret: string,
+        connection: DBConnectionDecrypted,
+        alternateTokenPath?: string
+    ): Promise<object> {
+        try {
+            const credentials = connection.credentials as OAuth2Credentials;
+            const headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
+
+            const botBody = new URLSearchParams({
+                client_id: clientId,
+                client_secret: clientSecret,
+                grant_type: 'refresh_token',
+                refresh_token: credentials.refresh_token!
+            });
+            const botResponse = await axios.post(tokenUrl, botBody.toString(), { headers });
+            if (botResponse.status !== 200 || !botResponse.data) {
+                throw new NangoError('slack_refresh_token_request_error', botResponse.data);
+            }
+            if (botResponse.data?.ok === false) {
+                throw new NangoError('slack_refresh_token_request_error', botResponse.data?.error ?? 'token_refresh_failed');
+            }
+
+            const raw = credentials.raw as Record<string, any> | undefined;
+            const userRefreshToken = alternateTokenPath ? (raw?.[alternateTokenPath]?.['refresh_token'] as string | undefined) : undefined;
+            // Skip dual refresh when the user refresh token is absent or identical to the bot refresh token.
+            // Identical means the connection is user-only (credentials.refresh_token was derived from
+            // raw[alternateTokenPath]) — consuming the same refresh token twice would invalidate it.
+            if (!userRefreshToken || userRefreshToken === credentials.refresh_token) {
+                return botResponse.data;
+            }
+
+            const userBody = new URLSearchParams({
+                client_id: clientId,
+                client_secret: clientSecret,
+                grant_type: 'refresh_token',
+                refresh_token: userRefreshToken
+            });
+
+            // User token refresh is non-fatal, if it fails, preserve existing user token data so
+            // the next refresh cycle can retry rather than losing it entirely.
+            const userResponse = await (async () => {
+                try {
+                    const res = await axios.post(tokenUrl, userBody.toString(), { headers });
+                    // Slack returns 200 with ok: false on error
+                    return res.data?.ok === false ? null : res;
+                } catch {
+                    return null;
+                }
+            })();
+
+            if (!userResponse) {
+                return {
+                    ...botResponse.data,
+                    ...(alternateTokenPath && raw?.[alternateTokenPath]?.['refresh_token'] && { [alternateTokenPath]: raw[alternateTokenPath] })
+                };
+            }
+
+            const userTokenData = (alternateTokenPath ? (userResponse.data[alternateTokenPath] ?? userResponse.data) : userResponse.data) as Record<
+                string,
+                unknown
+            >;
+            const minExpiresIn = this.pickMinExpiresIn(botResponse.data, userTokenData as Record<string, any>);
+
+            return {
+                ...botResponse.data,
+                ...(alternateTokenPath && { [alternateTokenPath]: userTokenData }),
+                ...(minExpiresIn !== undefined && { expires_in: minExpiresIn })
+            };
+        } catch (err: any) {
+            throw new NangoError('slack_refresh_token_request_error', err.message);
+        }
+    }
+
+    private async refreshMicrosoftTeamsBotToken(tokenUrl: string, clientId: string, clientSecret: string, connection: DBConnectionDecrypted): Promise<object> {
+        try {
+            const credentials = connection.credentials as OAuth2Credentials;
+            const connectionConfig = connection.connection_config;
+            const headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
+
+            const graphBody = {
+                client_id: clientId,
+                client_secret: clientSecret,
+                refresh_token: credentials.refresh_token!,
+                grant_type: 'refresh_token'
+            };
+            const graphResponse = await axios.post(tokenUrl, graphBody, { headers });
+            if (graphResponse.status !== 200 || !graphResponse.data) {
+                throw new NangoError('microsoft_teams_bot_refresh_token_request_error', graphResponse.data);
+            }
+            const graphToken = graphResponse.data as Record<string, unknown>;
+
+            const botHostTenantId = connectionConfig['botHostTenantId'];
+            if (!botHostTenantId) {
+                return graphToken;
+            }
+
+            const botTokenUrl = `https://login.microsoftonline.com/${botHostTenantId}/oauth2/v2.0/token`;
+            const botBody = new URLSearchParams({
+                client_id: clientId,
+                client_secret: clientSecret,
+                grant_type: 'client_credentials',
+                scope: 'https://api.botframework.com/.default'
+            });
+            const botResponse = await axios.post(botTokenUrl, botBody.toString(), { headers });
+            if (botResponse.status !== 200 || !botResponse.data?.access_token) {
+                throw new NangoError('microsoft_teams_bot_bot_token_request_error', botResponse.data);
+            }
+            const expiresIn = Number(botResponse.data.expires_in) || 3600;
+            const botFrameworkAccessToken = {
+                access_token: botResponse.data.access_token,
+                expires_in: botResponse.data.expires_in,
+                expires_at: Date.now() + expiresIn * 1000
+            };
+            return {
+                ...graphToken,
+                botFrameworkAccessToken
+            };
+        } catch (err: any) {
+            throw new NangoError('microsoft_teams_bot_refresh_token_request_error', stringifyError(err));
+        }
+    }
+
     private async createMicrosoftAdminToken(
         tokenUrl: string,
         clientId: string,
@@ -1098,9 +2047,12 @@ class ProviderClient {
                 };
             }
 
-            throw new NangoError('microsoft_admin_token_request_error', response.data);
+            throw new NangoError('microsoft_admin_token_request_error', stringifyError({ response }));
         } catch (err: any) {
-            throw new NangoError('microsoft_admin_token_request_error', err.message);
+            if (err instanceof NangoError) {
+                throw err;
+            }
+            throw new NangoError('microsoft_admin_token_request_error', stringifyError(err));
         }
     }
 
@@ -1135,6 +2087,66 @@ class ProviderClient {
             throw new NangoError('microsoft_admin_token_refresh_request_error', response.data);
         } catch (err: any) {
             throw new NangoError('microsoft_admin_token_refresh_request_error', err.message);
+        }
+    }
+
+    private async createAttioMcpToken(
+        tokenUrl: string,
+        code: string,
+        clientId: string,
+        redirectUri: string,
+        codeVerifier: string
+    ): Promise<AuthorizationTokenResponse> {
+        try {
+            const body = new URLSearchParams({
+                grant_type: 'authorization_code',
+                code,
+                client_id: clientId,
+                redirect_uri: redirectUri,
+                code_verifier: codeVerifier
+            });
+
+            const headers = {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            };
+
+            const response = await axios.post(tokenUrl, body.toString(), { headers });
+
+            if (response.status === 200 && response.data) {
+                return {
+                    ...response.data
+                };
+            }
+
+            throw new NangoError('attio_mcp_token_request_error');
+        } catch (err: any) {
+            throw new NangoError('attio_mcp_token_request_error', stringifyError(err));
+        }
+    }
+
+    private async refreshAttioMcpToken(tokenUrl: string, refreshToken: string, clientId: string): Promise<RefreshTokenResponse> {
+        try {
+            const body = new URLSearchParams({
+                client_id: clientId,
+                grant_type: 'refresh_token',
+                refresh_token: refreshToken
+            });
+
+            const headers = {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            };
+
+            const response = await axios.post(tokenUrl, body.toString(), { headers });
+
+            if (response.status === 200 && response.data) {
+                return {
+                    ...response.data
+                };
+            }
+
+            throw new NangoError('attio_mcp_refresh_token_request_error');
+        } catch (err: any) {
+            throw new NangoError('attio_mcp_refresh_token_request_error', stringifyError(err));
         }
     }
 }

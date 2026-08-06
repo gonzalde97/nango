@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import * as node_config_overrides from './node_config_overrides.js';
 import { getTestDbClient } from '../db/helpers.test.js';
+import * as node_config_overrides from './node_config_overrides.js';
 
 describe('NodeConfgOverrides', () => {
     const dbClient = getTestDbClient('nodes');
@@ -22,7 +22,10 @@ describe('NodeConfgOverrides', () => {
         storageMb: 1000,
         isTracingEnabled: false,
         isProfilingEnabled: false,
-        idleMaxDurationMs: 1_800_000
+        idleMaxDurationMs: 1_800_000,
+        executionTimeoutSecs: -1,
+        provisionedConcurrency: -1,
+        replicas: 3
     };
 
     it('should be successfully created', async () => {
@@ -37,6 +40,9 @@ describe('NodeConfgOverrides', () => {
             isTracingEnabled: props.isTracingEnabled,
             isProfilingEnabled: props.isProfilingEnabled,
             idleMaxDurationMs: props.idleMaxDurationMs,
+            executionTimeoutSecs: props.executionTimeoutSecs,
+            provisionedConcurrency: props.provisionedConcurrency,
+            replicas: props.replicas,
             createdAt: expect.any(Date),
             updatedAt: expect.any(Date)
         });
@@ -52,7 +58,10 @@ describe('NodeConfgOverrides', () => {
                 storageMb: null,
                 isTracingEnabled: null,
                 isProfilingEnabled: null,
-                idleMaxDurationMs: null
+                idleMaxDurationMs: null,
+                executionTimeoutSecs: null,
+                provisionedConcurrency: null,
+                replicas: null
             })
         ).unwrap();
         expect(nodeConfigOverride).toStrictEqual({
@@ -65,6 +74,9 @@ describe('NodeConfgOverrides', () => {
             isTracingEnabled: null,
             isProfilingEnabled: null,
             idleMaxDurationMs: null,
+            executionTimeoutSecs: null,
+            provisionedConcurrency: null,
+            replicas: null,
             createdAt: expect.any(Date),
             updatedAt: expect.any(Date)
         });
@@ -80,7 +92,10 @@ describe('NodeConfgOverrides', () => {
             storageMb: 2000,
             isTracingEnabled: true,
             isProfilingEnabled: true,
-            idleMaxDurationMs: 1_800_000
+            idleMaxDurationMs: 1_800_000,
+            executionTimeoutSecs: -1,
+            provisionedConcurrency: -1,
+            replicas: 5
         };
         const updatedNodeConfigOverride = (await node_config_overrides.upsert(dbClient.db, updatedProps)).unwrap();
         expect(updatedNodeConfigOverride).toStrictEqual({
@@ -92,6 +107,9 @@ describe('NodeConfgOverrides', () => {
             isTracingEnabled: updatedProps.isTracingEnabled,
             isProfilingEnabled: updatedProps.isProfilingEnabled,
             idleMaxDurationMs: updatedProps.idleMaxDurationMs,
+            executionTimeoutSecs: updatedProps.executionTimeoutSecs,
+            provisionedConcurrency: updatedProps.provisionedConcurrency,
+            replicas: updatedProps.replicas,
             updatedAt: expect.any(Date)
         });
     });

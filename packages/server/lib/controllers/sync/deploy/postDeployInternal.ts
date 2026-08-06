@@ -5,9 +5,10 @@ import { logContextGetter } from '@nangohq/logs';
 import { cleanIncomingFlow, configService, connectionService, deploy, environmentService, errorManager, getAndReconcileDifferences } from '@nangohq/shared';
 import { zodErrorToHTTP } from '@nangohq/utils';
 
-import { validationWithNangoYaml as validation } from './validation.js';
+import { startFunctionDeletion } from '../../../tasks/startFunctionDeletion.js';
 import { asyncWrapper } from '../../../utils/asyncWrapper.js';
 import { getOrchestrator } from '../../../utils/utils.js';
+import { validationWithNangoYaml as validation } from './validation.js';
 
 import type { PostDeployInternal } from '@nangohq/types';
 
@@ -91,10 +92,11 @@ export const postDeployInternal = asyncWrapper<PostDeployInternal>(async (req, r
         nangoYamlBody: body.nangoYamlBody,
         onEventScriptsByProvider: body.onEventScriptsByProvider,
         debug: body.debug,
-        jsonSchema: body.jsonSchema,
+        aggregatedJsonSchema: body.jsonSchema,
         logContextGetter,
         sdkVersion: body.sdkVersion,
-        orchestrator
+        orchestrator,
+        source: 'catalog'
     });
 
     if (!success || !syncConfigDeployResult) {
@@ -109,10 +111,11 @@ export const postDeployInternal = asyncWrapper<PostDeployInternal>(async (req, r
             flows: body.flowConfigs,
             performAction: body.reconcile,
             debug: body.debug,
-            singleDeployMode: body.singleDeployMode,
+            deployMode: body.deployMode,
             logCtx,
             logContextGetter,
-            orchestrator
+            orchestrator,
+            onFunctionDeleted: ({ syncConfigId, models }) => startFunctionDeletion({ syncConfigId, environmentId: environment.id, models })
         });
         if (!success) {
             res.status(500).send({

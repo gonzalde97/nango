@@ -14,11 +14,14 @@ export interface DBEnvironment extends TimestampsAndDeletedCorrect {
     uuid: string;
     name: string;
     account_id: number;
+    /**
+     * @deprecated Field secret_key is deprecated.
+     * New code should use SecretService to retrieve secrets for environments.
+     * This field is populated for backward compatibility only.
+     * It may be removed in a future release.
+     */
     secret_key: string;
     public_key: string;
-    secret_key_iv?: string | null;
-    secret_key_tag?: string | null;
-    secret_key_hashed?: string | null;
     callback_url: string | null;
     /**
      * @deprecated
@@ -38,14 +41,19 @@ export interface DBEnvironment extends TimestampsAndDeletedCorrect {
     secret_key_rotatable?: boolean;
     public_key_rotatable?: boolean;
 
+    /**
+     * @deprecated Field pending_secret_key is deprecated.
+     * New code should use SecretService to rotate secrets for environments.
+     * This field is populated for backward compatibility only.
+     * It may be removed in a future release.
+     */
     pending_secret_key: string | null;
-    pending_secret_key_iv?: string | null;
-    pending_secret_key_tag?: string | null;
     pending_public_key?: string | null;
     slack_notifications: boolean;
 
     webhook_receive_url: string | null;
     otlp_settings: { endpoint: string; headers: Record<string, string> } | null;
+    is_production: boolean;
 }
 
 export interface DBExternalWebhook extends Timestamps {
@@ -58,4 +66,42 @@ export interface DBExternalWebhook extends Timestamps {
     on_auth_refresh_error: boolean;
     on_sync_error: boolean;
     on_async_action_completion: boolean;
+}
+
+export interface DBAPISecret extends Timestamps {
+    id: number;
+    environment_id: number;
+    display_name: string;
+    secret: string;
+    iv: string;
+    tag: string;
+    hashed: string;
+    is_default: boolean;
+}
+
+export type CustomerKeyType = 'api' | 'webhook_signing';
+
+export interface DBCustomerKey extends Timestamps {
+    id: number;
+    account_id: number;
+    key_type: CustomerKeyType;
+    display_name: string;
+    scopes: string[] | null;
+    secret: string;
+    iv: string;
+    tag: string;
+    hashed: string;
+    sandbox_signing_secret: string | null;
+    sandbox_signing_secret_iv: string | null;
+    sandbox_signing_secret_tag: string | null;
+    last_used_at: Date | null;
+    deleted_at: Date | null;
+}
+
+export type CustomerKeyEntityType = 'environment' | 'account';
+
+export interface DBCustomerKeyRelation {
+    customer_key_id: number;
+    entity_type: CustomerKeyEntityType;
+    entity_id: number;
 }

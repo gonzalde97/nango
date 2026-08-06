@@ -1,56 +1,95 @@
-import { IconCheck, IconChevronDown } from '@tabler/icons-react';
 import { useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link2 } from 'lucide-react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useSearchParam, useUnmount } from 'react-use';
 import { useSWRConfig } from 'swr';
 
+import { permissions } from '@nangohq/authz';
+import { Button, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@nangohq/design-system';
 import Nango from '@nangohq/frontend';
 
-import { SimpleTooltip } from '../../../components/SimpleTooltip';
-import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '../../../components/ui/Command';
-import IntegrationLogo from '../../../components/ui/IntegrationLogo';
-import { Popover, PopoverContent, PopoverTrigger } from '../../../components/ui/Popover';
-import { Button } from '../../../components/ui/button/Button';
+import { PermissionGate } from '@/components/patterns/PermissionGate';
+import { InfoTooltip } from '@/components/ui/InfoTooltip';
+import { usePermissions } from '@/hooks/usePermissions';
+import { darkModeSelector, useThemeStore } from '@/lib/theme';
+import { Tooltip, TooltipContent, TooltipTrigger } from '../../../components/ui/Tooltip';
 import { apiConnectSessions } from '../../../hooks/useConnect';
 import { clearConnectionsCache } from '../../../hooks/useConnections';
 import { useEnvironment } from '../../../hooks/useEnvironment';
-import { clearIntegrationsCache, useListIntegration } from '../../../hooks/useIntegration';
+import { useListIntegrations } from '../../../hooks/useIntegration';
 import { GetUsageQueryKey, useApiGetUsage } from '../../../hooks/usePlan';
 import { useToast } from '../../../hooks/useToast';
-import { useUser } from '../../../hooks/useUser';
 import { useStore } from '../../../store';
+import { track } from '../../../utils/analytics';
 import { globalEnv } from '../../../utils/env';
-import { cn } from '../../../utils/utils';
+import { formatDateToPreciseUSFormat } from '../../../utils/utils';
+import { IntegrationDropdown } from './IntegrationDropdown';
 
 import type { AuthResult, ConnectUI, OnConnectEvent } from '@nangohq/frontend';
 import type { ApiIntegrationList } from '@nangohq/types';
 
-export const CreateConnectionSelector: React.FC = () => {
+interface CreateConnectionSelectorProps {
+    integration: ApiIntegrationList | undefined;
+    setIntegration: (integration: ApiIntegrationList | undefined) => void;
+    testUserId: string;
+    testUserEmail: string;
+    testUserName: string;
+    testUserTags: Record<string, string>;
+    overrideAuthParams: Record<string, string>;
+    overrideOauthScopes: string | undefined;
+    overrideClientId: string | undefined;
+    overrideClientSecret: string | undefined;
+    overrideDocUrl: string | undefined;
+    overrideWebhookUrl: string | undefined;
+    defaultDocUrl?: string;
+    isFormValid?: boolean;
+}
+
+export const CreateConnectionSelector: React.FC<CreateConnectionSelectorProps> = ({
+    integration,
+    setIntegration,
+    testUserId,
+    testUserEmail,
+    testUserName,
+    testUserTags,
+    overrideAuthParams,
+    overrideOauthScopes,
+    overrideClientId,
+    overrideClientSecret,
+    overrideDocUrl,
+    overrideWebhookUrl,
+    defaultDocUrl,
+    isFormValid = true
+}) => {
     const paramIntegrationId = useSearchParam('integration_id');
     const toast = useToast();
     const navigate = useNavigate();
     const queryClient = useQueryClient();
 
     const env = useStore((state) => state.env);
-    const { environmentAndAccount } = useEnvironment(env);
-    const { list: listIntegration, mutate: listIntegrationMutate, loading } = useListIntegration(env);
+    const { data } = useEnvironment(env);
+    const environmentAndAccount = data?.environmentAndAccount;
+    const environment = environmentAndAccount?.environment;
+    const { data: listIntegrationData, isLoading: listIntegrationPending } = useListIntegrations(env);
+
+    const { can } = usePermissions();
+    const canCreateTestConnection = can(permissions.canWriteProdConnections) || !environment?.is_production;
 
     const connectUI = useRef<ConnectUI>();
+    const isDarkMode = useThemeStore(darkModeSelector);
     const hasConnected = useRef<AuthResult | undefined>();
     const { mutate, cache } = useSWRConfig();
+    const [isShareLinkLoading, setIsShareLinkLoading] = useState(false);
 
-    const [open, setOpen] = useState(false);
-    const [integration, setIntegration] = useState<ApiIntegrationList>();
-
-    const { user } = useUser(true);
     const testUser = useMemo(() => {
         return {
-            id: `test_${user!.name.toLocaleLowerCase().replaceAll(' ', '_')}`,
-            email: user!.email,
-            display_name: user!.name
+            id: testUserId,
+            email: testUserEmail,
+            display_name: testUserName,
+            tags: testUserTags
         };
-    }, [user]);
+    }, [testUserId, testUserEmail, testUserName, testUserTags]);
 
     const { data: usage, isLoading: usageLoading } = useApiGetUsage(env);
     const usageCapReached = useMemo(() => {
@@ -65,22 +104,79 @@ export const CreateConnectionSelector: React.FC = () => {
         if (!integration) {
             return false;
         }
-        return integration.missing_fields.length > 0;
-    }, [integration]);
 
-    useEffect(() => {
-        if (paramIntegrationId && listIntegration) {
-            const exists = listIntegration.find((v) => v.unique_key === paramIntegrationId);
-            if (exists) {
-                setIntegration(exists);
+        const missingFields = integration.missing_fields.filter((field) => {
+            if (field === 'oauth_client_id' && overrideClientId !== undefined) {
+                return false;
             }
-        }
-    }, [paramIntegrationId, listIntegration]);
+            if (field === 'oauth_client_secret' && overrideClientSecret !== undefined) {
+                return false;
+            }
+            return true;
+        });
+
+        return missingFields.length > 0;
+    }, [integration, overrideClientId, overrideClientSecret]);
+
+    const createConnectSession = useCallback(async () => {
+        const isOauth2 = integration && ['OAUTH2', 'OAUTH2_CC', 'MCP_OAUTH2', 'MCP_OAUTH2_GENERIC'].includes(integration.meta.authMode);
+
+        const oauthScopesOverride = overrideOauthScopes !== undefined && overrideOauthScopes !== integration?.oauth_scopes ? overrideOauthScopes : undefined;
+        const webhookUrl = overrideWebhookUrl?.trim() ? overrideWebhookUrl.trim() : undefined;
+        const shouldSendDocsConnect = overrideDocUrl && overrideDocUrl !== defaultDocUrl;
+
+        // OAuth client/scope overrides only apply to OAuth flows and live in connection_config;
+        const oauthConfigOverrides =
+            isOauth2 && (overrideClientId !== undefined || overrideClientSecret !== undefined || oauthScopesOverride !== undefined)
+                ? {
+                      oauth_client_id_override: overrideClientId,
+                      oauth_client_secret_override: overrideClientSecret,
+                      oauth_scopes_override: oauthScopesOverride
+                  }
+                : undefined;
+        const connectionConfig = oauthConfigOverrides ? { ...oauthConfigOverrides } : undefined;
+
+        return await apiConnectSessions(env, {
+            allowed_integrations: integration ? [integration.unique_key] : undefined,
+            end_user: testUser,
+            integrations_config_defaults: integration
+                ? {
+                      [integration.unique_key]: {
+                          authorization_params: isOauth2 && overrideAuthParams && Object.keys(overrideAuthParams).length > 0 ? overrideAuthParams : undefined,
+                          connection_config: connectionConfig
+                      }
+                  }
+                : undefined,
+            overrides: integration
+                ? {
+                      [integration.unique_key]: {
+                          docs_connect: shouldSendDocsConnect ? overrideDocUrl : undefined
+                      }
+                  }
+                : undefined,
+            webhook_url_override: webhookUrl
+        });
+    }, [
+        integration,
+        overrideOauthScopes,
+        overrideClientId,
+        overrideClientSecret,
+        overrideDocUrl,
+        overrideWebhookUrl,
+        defaultDocUrl,
+        env,
+        testUser,
+        overrideAuthParams
+    ]);
 
     const onClickConnectUI = () => {
         if (!environmentAndAccount) {
             return;
         }
+
+        track('web:create_connection_button:clicked', {
+            provider: integration?.provider || 'unknown'
+        });
 
         const nango = new Nango({
             host: globalEnv.apiUrl,
@@ -90,41 +186,79 @@ export const CreateConnectionSelector: React.FC = () => {
         connectUI.current = nango.openConnectUI({
             baseURL: globalEnv.connectUrl,
             apiURL: globalEnv.apiUrl,
-            onEvent
+            onEvent,
+            themeOverride: isDarkMode ? 'dark' : 'light'
         });
 
         // We defer the token creation so the iframe can open and display a loading screen
         //   instead of blocking the main loop and no visual clue for the end user
         setTimeout(async () => {
-            const res = await apiConnectSessions(env, {
-                allowed_integrations: integration ? [integration.unique_key] : undefined,
-                end_user: testUser,
-                organization: undefined
-            });
+            const res = await createConnectSession();
             if ('error' in res.json) {
                 return;
             }
             connectUI.current!.setSessionToken(res.json.data.token);
-        }, 10);
+        }, 0);
+    };
+
+    const onClickShareConnectionLink = async () => {
+        if (!environmentAndAccount) {
+            return;
+        }
+
+        track('web:share_connection_link_button:clicked', {
+            provider: integration?.provider || 'unknown'
+        });
+
+        setIsShareLinkLoading(true);
+        try {
+            const res = await createConnectSession();
+            if (!res.res.ok || 'error' in res.json) {
+                toast.toast({ title: 'Failed to create shareable link', variant: 'error' });
+                return;
+            }
+
+            const { connect_link: connectLink, expires_at: expiresAt } = res.json.data;
+            const shareUrl = new URL(connectLink);
+            shareUrl.searchParams.set('apiURL', globalEnv.apiUrl);
+
+            try {
+                await navigator.clipboard.writeText(shareUrl.toString());
+                toast.toast({
+                    title: 'Shareable link copied',
+                    description: `Session expires in 30 mins (${formatDateToPreciseUSFormat(expiresAt)})`,
+                    variant: 'success'
+                });
+            } catch (_) {
+                toast.toast({ title: 'Failed to copy link', variant: 'error' });
+            }
+        } finally {
+            setIsShareLinkLoading(false);
+        }
     };
 
     const onEvent: OnConnectEvent = useCallback(
         (event) => {
             if (event.type === 'close') {
-                void listIntegrationMutate();
                 if (hasConnected.current) {
                     toast.toast({ title: `Connected to ${hasConnected.current.providerConfigKey}`, variant: 'success' });
                     navigate(`/${env}/connections/${integration?.unique_key || hasConnected.current.providerConfigKey}/${hasConnected.current.connectionId}`);
                 }
             } else if (event.type === 'connect') {
-                void listIntegrationMutate();
+                // TODO: remove after migrating all connection operations to tanstack query
                 clearConnectionsCache(cache, mutate);
-                clearIntegrationsCache(cache, mutate);
+                queryClient.invalidateQueries({ queryKey: ['integrations', env] });
                 queryClient.invalidateQueries({ queryKey: GetUsageQueryKey });
                 hasConnected.current = event.payload;
+                track('web:connection_created', { provider: integration?.provider || 'unknown' });
+            } else if (event.type === 'error') {
+                track('web:connection_failed', {
+                    provider: integration?.provider || 'unknown',
+                    errorType: event.payload.errorType
+                });
             }
         },
-        [toast, queryClient, env, navigate, integration, listIntegrationMutate, cache, mutate]
+        [toast, queryClient, env, navigate, integration, cache, mutate]
     );
 
     useUnmount(() => {
@@ -138,7 +272,7 @@ export const CreateConnectionSelector: React.FC = () => {
             return (
                 <p>
                     Connection limit reached.{' '}
-                    <Link to={`/${env}/team/billing`} className="underline">
+                    <Link to={`/team/billing`} className="underline">
                         Upgrade your plan
                     </Link>{' '}
                     to get rid of connection limits.
@@ -156,75 +290,79 @@ export const CreateConnectionSelector: React.FC = () => {
                 </p>
             );
         }
+        if (!isFormValid) {
+            return <p>Please fix the errors in the advanced configuration.</p>;
+        }
         return null;
-    }, [usageCapReached, integrationHasMissingFields]);
+    }, [usageCapReached, integrationHasMissingFields, env, integration, isFormValid]);
 
     return (
-        <div className="flex flex-col gap-4">
-            <label htmlFor="integration_id">Pick an integration</label>
-            <div className="flex gap-4">
-                <Popover open={open} onOpenChange={setOpen}>
-                    <PopoverTrigger asChild>
-                        <Button role="combobox" variant={'select'} size={'lg'} className="justify-between grow" disabled={Boolean(paramIntegrationId)}>
-                            {integration ? (
-                                <div className="flex gap-3">
-                                    <IntegrationLogo provider={integration.provider} /> {integration.unique_key}
-                                </div>
-                            ) : (
-                                'Choose from the list'
-                            )}
-                            <IconChevronDown stroke={1} size={18} />
-                        </Button>
-                    </PopoverTrigger>
-                    <PopoverContent
-                        side="bottom"
-                        align="start"
-                        style={{ width: 'var(--radix-popover-trigger-width)' }}
-                        className="bg-grayscale-900 w-full px-3"
-                    >
-                        <Command>
-                            <CommandInput
-                                placeholder="Search integrations..."
-                                className="text-white ring-0 focus:ring-0 focus-visible:outline-hidden"
-                            ></CommandInput>
-                            <CommandList className="max-h-[400px]">
-                                <CommandEmpty>{loading ? 'Loading integrations...' : 'No integrations found.'}</CommandEmpty>
-                                <CommandGroup className="px-0">
-                                    {listIntegration?.map((item) => {
-                                        const checked = integration && item.unique_key === integration.unique_key;
-                                        return (
-                                            <CommandItem
-                                                key={item.unique_key}
-                                                value={item.unique_key}
-                                                onSelect={(curr) => {
-                                                    setIntegration(
-                                                        integration && curr === integration.unique_key
-                                                            ? undefined
-                                                            : listIntegration.find((v) => v.unique_key === curr)!
-                                                    );
-                                                    setOpen(false);
-                                                }}
-                                                className={cn('items-center pl-2 py-2.5 justify-between text-white', checked && 'bg-grayscale-1000')}
-                                            >
-                                                <div className="flex gap-3">
-                                                    <IntegrationLogo provider={item.provider} /> {item.unique_key}
-                                                </div>
-                                                <IconCheck className={cn('mr-2 h-4 w-4', checked ? 'opacity-100' : 'opacity-0')} />
-                                            </CommandItem>
-                                        );
-                                    })}
-                                </CommandGroup>
-                            </CommandList>
-                        </Command>
-                    </PopoverContent>
-                </Popover>
-
-                <SimpleTooltip tooltipContent={tooltipContent} side="bottom" delay={0}>
-                    <Button onClick={onClickConnectUI} size="lg" disabled={usageCapReached || integrationHasMissingFields}>
-                        Authorize
-                    </Button>
-                </SimpleTooltip>
-            </div>
-        </div>
+        <Card>
+            <CardHeader>
+                <CardTitle>Test connection</CardTitle>
+                <CardDescription>Pick an integration to test from the list below</CardDescription>
+            </CardHeader>
+            <CardContent>
+                <div className="flex flex-col gap-2.5">
+                    <div className="flex flex-col w-full">
+                        <IntegrationDropdown
+                            integrations={listIntegrationData?.data ?? []}
+                            selectedIntegration={integration}
+                            onSelect={setIntegration}
+                            loading={listIntegrationPending}
+                            disabled={Boolean(paramIntegrationId)}
+                        />
+                    </div>
+                    <div className="flex flex-row items-start gap-3">
+                        <div className="flex flex-col items-start">
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <span className="inline-block" tabIndex={0}>
+                                        <PermissionGate condition={canCreateTestConnection}>
+                                            {(allowed) => (
+                                                <Button
+                                                    onClick={onClickConnectUI}
+                                                    size="md"
+                                                    disabled={usageCapReached || integrationHasMissingFields || !isFormValid || !allowed}
+                                                >
+                                                    Authorize
+                                                </Button>
+                                            )}
+                                        </PermissionGate>
+                                    </span>
+                                </TooltipTrigger>
+                                {tooltipContent && <TooltipContent side="bottom">{tooltipContent}</TooltipContent>}
+                            </Tooltip>
+                        </div>
+                        <div className="flex flex-row items-center gap-2">
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <span className="inline-block" tabIndex={0}>
+                                        <PermissionGate condition={canCreateTestConnection}>
+                                            {(allowed) => (
+                                                <Button
+                                                    onClick={onClickShareConnectionLink}
+                                                    size="md"
+                                                    variant="ghost"
+                                                    loading={isShareLinkLoading}
+                                                    disabled={usageCapReached || integrationHasMissingFields || !isFormValid || !allowed}
+                                                >
+                                                    <Link2 />
+                                                    Share connect link
+                                                </Button>
+                                            )}
+                                        </PermissionGate>
+                                    </span>
+                                </TooltipTrigger>
+                                {tooltipContent && <TooltipContent side="bottom">{tooltipContent}</TooltipContent>}
+                            </Tooltip>
+                            <InfoTooltip side="top">
+                                Anyone with this link can open Connect UI and finish authenticating. The link expires in 30 minutes.
+                            </InfoTooltip>
+                        </div>
+                    </div>
+                </div>
+            </CardContent>
+        </Card>
     );
 };

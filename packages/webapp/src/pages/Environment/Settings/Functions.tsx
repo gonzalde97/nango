@@ -1,114 +1,76 @@
-import { IconExternalLink } from '@tabler/icons-react';
-import { Trash2 } from 'lucide-react';
+import { ExternalLink } from 'lucide-react';
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
 
-import SettingsContent from './components/SettingsContent';
-import { Input } from '../../../components/ui/input/Input';
-import SecretInput from '../../../components/ui/input/SecretInput';
-import { apiPostVariables, useEnvironment } from '../../../hooks/useEnvironment';
+import { permissions } from '@nangohq/authz';
+import { Button } from '@nangohq/design-system';
+
+import { KeyValueInput } from '@/components/patterns/KeyValueInput';
+import { PermissionGate } from '@/components/patterns/PermissionGate';
+import { ButtonLink } from '@/components/ui/ButtonLink';
+import { usePermissions } from '@/hooks/usePermissions';
+import { useEnvironment, usePostVariables } from '../../../hooks/useEnvironment';
 import { useToast } from '../../../hooks/useToast';
 import { useStore } from '../../../store';
-import { cn } from '../../../utils/utils';
-import { Button } from '@/components-v2/ui/button';
+import { APIError } from '../../../utils/api';
+import SettingsContent from './components/SettingsContent';
 
 import type { ApiEnvironmentVariable } from '@nangohq/types';
 
 export const Functions: React.FC = () => {
     const { toast } = useToast();
     const env = useStore((state) => state.env);
-    const { environmentAndAccount, mutate } = useEnvironment(env);
+    const { data } = useEnvironment(env);
+    const environmentAndAccount = data?.environmentAndAccount;
+    const environment = environmentAndAccount?.environment;
+    const { mutateAsync: postVariablesAsync, isPending } = usePostVariables(env);
+
+    const { can } = usePermissions();
+    const canEditEnvironmentVars = can(permissions.canWriteProdEnvironmentVariables) || !environment?.is_production;
 
     const [edit, setEdit] = useState(false);
-    const [loading, setLoading] = useState(false);
-    const [vars, setVars] = useState<ApiEnvironmentVariable[]>(() =>
-        environmentAndAccount && environmentAndAccount.env_variables.length > 0
-            ? JSON.parse(JSON.stringify(environmentAndAccount.env_variables))
-            : [{ name: '', value: '' }]
-    );
+    const [vars, setVars] = useState<Record<string, string>>(() => {
+        if (environmentAndAccount && environmentAndAccount.env_variables.length > 0) {
+            return environmentAndAccount.env_variables.reduce<Record<string, string>>((acc, curr) => {
+                acc[curr.name] = curr.value;
+                return acc;
+            }, {});
+        }
+        return {};
+    });
     const [errors, setErrors] = useState<{ index: number; key: 'name' | 'value'; error: string }[]>([]);
 
-    const onEnabledEdit = () => {
-        if (vars[vars.length - 1].name !== '') {
-            setVars((copy) => [...copy, { name: '', value: '' }]);
-        }
-        setEdit(true);
-    };
-
-    const onUpdate = (key: 'name' | 'value', value: string, index: number) => {
-        setVars((copy) => {
-            copy[index][key] = value;
-            if (copy.length === index + 1 && value !== '') {
-                copy[index + 1] = { name: '', value: '' };
-            }
-            return [...copy];
-        });
-    };
-
-    const onRemove = (index: number) => {
-        if (index === 0 && vars.length === 1) {
-            setVars([{ name: '', value: '' }]);
-            setErrors([]);
-        } else {
-            setVars(vars.filter((_, i) => i !== index));
-            setErrors(errors.filter((e) => e.index !== index));
-        }
-    };
-
-    const onPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
-        const filtered = handlePastedEnv(
-            e.clipboardData.getData('Text'),
-            vars.map((v) => v.name)
-        );
-        if (!filtered || filtered.size === 0) {
-            return;
-        }
-
-        e.preventDefault();
-
-        setVars((prev) => {
-            const copy = [...prev].filter((v) => v.value !== '');
-            const next = Array.from(filtered);
-
-            copy.push(...next.map((v) => ({ name: v[0], value: v[1] })));
-            copy.push({ name: '', value: '' });
-            return copy;
-        });
-    };
-
     const onSave = async () => {
-        setLoading(true);
-        const res = await apiPostVariables(env, {
-            variables: vars.filter((v) => v.name !== '' || v.value !== '')
-        });
-
-        setLoading(false);
-
-        if ('error' in res.json) {
+        const variables: ApiEnvironmentVariable[] = Object.entries(vars).map(([name, value]) => ({ name, value }));
+        try {
+            await postVariablesAsync({ variables });
+            setEdit(false);
+            setErrors([]);
+        } catch (err) {
             toast({ title: 'There was an issue updating the environment variables', variant: 'error' });
-            if (res.json.error.code === 'invalid_body' && res.json.error.errors) {
+            if (err instanceof APIError && 'error' in err.json && err.json.error.code === 'invalid_body' && err.json.error.errors) {
                 setErrors(
-                    res.json.error.errors.map((err) => {
-                        if (err.path[0] !== 'variables') {
+                    err.json.error.errors.map((e: any) => {
+                        if (e.path[0] !== 'variables') {
                             return null as any;
                         }
-                        return { index: err.path[1], key: err.path[2], error: err.message };
+                        return { index: e.path[1], key: e.path[2], error: e.message };
                     })
                 );
             }
-            return;
         }
-
-        void mutate();
-
-        setEdit(false);
-        setVars((prev) => (prev.length > 1 ? prev.filter((v) => v.name !== '' || v.value !== '') : prev));
-        setErrors([]);
     };
 
     const onCancel = () => {
         setErrors([]);
-        setVars(environmentAndAccount!.env_variables.length > 0 ? JSON.parse(JSON.stringify(environmentAndAccount!.env_variables)) : [{ name: '', value: '' }]);
+        if (environmentAndAccount && environmentAndAccount.env_variables.length > 0) {
+            const initialVars = environmentAndAccount.env_variables.reduce<Record<string, string>>((acc, curr) => {
+                acc[curr.name] = curr.value;
+                return acc;
+            }, {});
+            setVars(initialVars);
+        } else {
+            setVars({});
+        }
         setEdit(false);
     };
 
@@ -117,76 +79,50 @@ export const Functions: React.FC = () => {
     }
 
     return (
-        <SettingsContent title="Functions">
+        <SettingsContent title="Function env vars">
             <div className="flex flex-col gap-2.5">
-                <div className="flex">
+                <div className="inline-flex items-center gap-2">
                     Environment variables
-                    <Link className="flex items-center px-1.5" target="_blank" to="https://nango.dev/docs/reference/functions#environment-variables">
-                        <IconExternalLink stroke={1} size={18} />
-                    </Link>
+                    <ButtonLink variant="ghost" size="2xs" target="_blank" to="https://nango.dev/docs/reference/functions/functions-sdk#environment-variables">
+                        <ExternalLink />
+                    </ButtonLink>
                 </div>
                 <div className="flex flex-col gap-5">
                     <fieldset className="flex flex-col gap-3">
-                        {vars.map((envVar, i) => {
-                            const errorName = errors.find((err) => err.index === i && err.key === 'name');
-                            const errorValue = errors.find((err) => err.index === i && err.key === 'value');
-                            return (
-                                <div key={i} className="flex flex-col gap-0.5">
-                                    <div className="flex gap-3">
-                                        <div className="flex-1">
-                                            <Input
-                                                value={envVar.name}
-                                                onChange={(e) => onUpdate('name', e.target.value, i)}
-                                                inputSize={'lg'}
-                                                variant={'black'}
-                                                onPaste={(e) => onPaste(e)}
-                                                className={cn(errorName && 'border-alert-400')}
-                                                placeholder="MY_ENV_VAR"
-                                                disabled={!edit || loading}
-                                            />
-                                        </div>
-                                        <div className="flex flex-1">
-                                            <SecretInput
-                                                value={envVar.value}
-                                                onChange={(e) => onUpdate('value', e.target.value, i)}
-                                                copy={true}
-                                                inputSize={'lg'}
-                                                variant={'black'}
-                                                onPaste={(e) => onPaste(e)}
-                                                className={cn(errorValue && 'border-alert-400')}
-                                                placeholder="value"
-                                                disabled={!edit || loading}
-                                            />
-                                            {edit && (
-                                                <Button variant="ghost" size="lg" className="py-2 px-2 h-full w-11" onClick={() => !loading && onRemove(i)}>
-                                                    <Trash2 className="text-fg-error" />
-                                                </Button>
-                                            )}
-                                        </div>
+                        <KeyValueInput
+                            initialValues={vars}
+                            onChange={setVars}
+                            placeholderKey="MY_ENV_VAR"
+                            placeholderValue="value"
+                            disabled={!edit || isPending}
+                            isSecret={true}
+                        />
+                        {errors.length > 0 && (
+                            <div className="flex flex-col gap-1">
+                                {errors.map((err, i) => (
+                                    <div key={i} className="text-body-small-regular text-status-danger-text">
+                                        Row {err.index + 1}, {err.key}: {err.error}
                                     </div>
-
-                                    {(errorName || errorValue) && (
-                                        <div className="flex gap-2">
-                                            <div className="w-[225px]">{errorName && <div className="text-alert-400 text-s">{errorName.error}</div>}</div>
-                                            <div className="w-[225px]">{errorValue && <div className="text-alert-400 text-s">{errorValue.error}</div>}</div>
-                                        </div>
-                                    )}
-                                </div>
-                            );
-                        })}
+                                ))}
+                            </div>
+                        )}
                     </fieldset>
                     <div className="flex justify-start gap-2">
                         {!edit && (
-                            <Button variant="secondary" onClick={() => onEnabledEdit()}>
-                                Edit
-                            </Button>
+                            <PermissionGate asChild condition={canEditEnvironmentVars}>
+                                {(allowed) => (
+                                    <Button variant="outline" onClick={() => setEdit(true)} disabled={!allowed}>
+                                        Edit
+                                    </Button>
+                                )}
+                            </PermissionGate>
                         )}
                         {edit && (
                             <>
-                                <Button variant="tertiary" onClick={onCancel}>
+                                <Button variant="outline" onClick={onCancel}>
                                     Cancel
                                 </Button>
-                                <Button variant="primary" onClick={onSave} disabled={loading}>
+                                <Button variant="primary" onClick={onSave} disabled={isPending}>
                                     Save
                                 </Button>
                             </>
@@ -197,34 +133,3 @@ export const Functions: React.FC = () => {
         </SettingsContent>
     );
 };
-
-function handlePastedEnv(clip: string, prev: string[]) {
-    if (!clip) {
-        return;
-    }
-
-    const split = clip.split(/[\n, ]/g);
-
-    const filtered = new Map<string, string>();
-    for (const item of split) {
-        if (!item.includes('=')) {
-            continue;
-        }
-
-        const line = item.split('=');
-        if (line.length > 2 || line[0] === '') {
-            continue;
-        }
-
-        const name = line[0].trim();
-        const value = line[1] ? line[1].trim().replaceAll(/['"]/g, '') : '';
-
-        // dedup
-        if (prev.find((v) => v === name)) {
-            continue;
-        }
-
-        filtered.set(name, value);
-    }
-    return filtered;
-}

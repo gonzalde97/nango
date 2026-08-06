@@ -1,4 +1,4 @@
-import { NodeEnv, localhostUrl } from './constants.js';
+import { localhostUrl, NodeEnv } from './constants.js';
 
 export const baseUrl = process.env['NANGO_SERVER_URL'] || localhostUrl;
 export const basePublicUrl = process.env['NANGO_PUBLIC_SERVER_URL'] || baseUrl;
@@ -13,10 +13,14 @@ export const isLocal = !isCloud && !isEnterprise && !isDocker && (process.env['N
 export const isTest = Boolean(process.env['CI'] !== undefined || process.env['VITEST']);
 export const isBasicAuthEnabled = !isCloud && process.env['NANGO_DASHBOARD_USERNAME'] && process.env['NANGO_DASHBOARD_PASSWORD'];
 export const isHosted = !isCloud && !isLocal && !isEnterprise;
+export const useLambda = isCloud && process.env['LAMBDA_ENABLED']?.toLowerCase() === 'true';
+export const useLambdaKeepWarm = useLambda && process.env['LAMBDA_KEEP_WARM_ENABLED']?.toLowerCase() === 'true';
 
 export const env = isStaging ? NodeEnv.Staging : isProd ? NodeEnv.Prod : NodeEnv.Dev;
 
-export const useS3 = Boolean(process.env['AWS_REGION'] && process.env['AWS_BUCKET_NAME']);
+export const useS3 = Boolean(
+    (process.env['AWS_INTEGRATIONS_REGION'] && process.env['AWS_INTEGRATIONS_BUCKET_NAME']) || (process.env['AWS_REGION'] && process.env['AWS_BUCKET_NAME'])
+);
 export const integrationFilesAreRemote = isEnterprise && useS3;
 
 export const flagHasScripts = isLocal || isEnterprise || isCloud || isTest;
@@ -31,7 +35,6 @@ export const flagHasUsage = process.env['FLAG_USAGE_ENABLED'] === 'true';
 export const flagEnforceCLIVersion = process.env['FLAG_ENFORCE_CLI_VERSION'] === 'true';
 // It's an object because we want to be able to mock it in tests
 export const flags = {
-    hasAdminCapabilities: Boolean(process.env['NANGO_ADMIN_UUID'])
+    hasAdminCapabilities: Boolean(process.env['NANGO_ADMIN_UUID']),
+    hasAuthRoles: process.env['FLAG_AUTH_ROLES_ENABLED'] === 'true'
 };
-
-export const actionAllowListCustomers = [0, 662, 1760, 1920, 4530, 5166, 7157, 7359, 7696, 2981, 6254];

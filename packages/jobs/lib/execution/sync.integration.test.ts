@@ -1,27 +1,31 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { multipleMigrations } from '@nangohq/database';
-import { clearDbTestsOnly as clearRecordsDb, format as recordsFormatter, migrate as migrateRecords, records as recordsService } from '@nangohq/records';
+import { format as recordsFormatter, records as recordsService } from '@nangohq/records';
+import { clearDb as clearRecordsDb } from '@nangohq/records/lib/stores/postgres/tests/helpers.js';
 import { getLatestSyncJob, isSyncJobRunning, seeders, updateSyncJobResult } from '@nangohq/shared';
 import { Ok, stringifyError } from '@nangohq/utils';
 
-import { handleSyncSuccess, startSync } from './sync.js';
 import { envs } from '../env.js';
+import { handleSyncSuccess, startSync } from './sync.js';
 
 import type { TaskAbort, TaskAction, TaskOnEvent, TaskSync, TaskSyncAbort, TaskWebhook } from '@nangohq/nango-orchestrator';
 import type { ReturnedRecord, UnencryptedRecordData } from '@nangohq/records';
-import type { Job as SyncJob, Sync } from '@nangohq/shared';
+import type { Sync, Job as SyncJob } from '@nangohq/shared';
 import type { ConnectionJobs, DBSyncConfig, SyncResult } from '@nangohq/types';
 
 const mockStartScript = vi.fn(() => Promise.resolve(Ok(undefined)));
 
 describe('Running sync', () => {
+    const logsEnabled = envs.NANGO_LOGS_ENABLED;
+
     beforeAll(async () => {
         await initDb();
         envs.NANGO_LOGS_ENABLED = false;
     });
 
     afterAll(async () => {
+        envs.NANGO_LOGS_ENABLED = logsEnabled;
         await clearRecordsDb();
     });
 
@@ -170,7 +174,7 @@ describe('Running sync', () => {
 
 const initDb = async () => {
     await multipleMigrations();
-    await migrateRecords();
+    await recordsService.migrate();
 };
 
 const runJob = async (
@@ -201,6 +205,7 @@ const runJob = async (
         },
         ownerKey: null,
         heartbeatTimeoutSecs: 30,
+        emptyCache: false,
         isSync: (): this is TaskSync => true,
         isWebhook: (): this is TaskWebhook => false,
         isAction: (): this is TaskAction => false,
@@ -237,7 +242,8 @@ const runJob = async (
         connectionId: connection.id,
         environmentId: connection.environment_id,
         model,
-        softDelete
+        softDelete,
+        plan: null
     });
     if (upserting.isErr()) {
         throw new Error(`failed to upsert records: ${upserting.error.message}`);
@@ -252,7 +258,13 @@ const runJob = async (
     };
     await updateSyncJobResult(syncJob.id, updatedResults, model);
 
-    await handleSyncSuccess({ taskId: 'abc', nangoProps: nangoProps.value, telemetryBag: { customLogs: 0, proxyCalls: 0, durationMs: 0, memoryGb: 1 } });
+    await handleSyncSuccess({
+        taskId: 'abc',
+        nangoProps: nangoProps.value,
+        telemetryBag: { customLogs: 0, proxyCalls: 0, durationMs: 0, memoryGb: 1 },
+        functionRuntime: 'runner',
+        checkpoints: null
+    });
 
     const latestSyncJob = await getLatestSyncJob(sync.id);
     if (!latestSyncJob) {
@@ -288,7 +300,7 @@ const verifySyncRun = async (
 };
 
 const getRecords = async (connection: ConnectionJobs, model: string) => {
-    const res = await recordsService.getRecords({ connectionId: connection.id, model });
+    const res = await recordsService.getRecords({ connectionId: connection.id, model, plan: null });
     if (res.isOk()) {
         return res.value.records;
     }
@@ -316,7 +328,8 @@ async function populateRecords(
             records: records.slice(i, i + chunkSize),
             connectionId: connection.id,
             environmentId: connection.environment_id,
-            model
+            model,
+            plan: null
         });
         if (res.isErr()) {
             throw new Error(`Failed to upsert records: ${res.error.message}`);

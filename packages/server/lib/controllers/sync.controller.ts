@@ -1,12 +1,12 @@
 import { logContextGetter } from '@nangohq/logs';
 import { records as recordsService } from '@nangohq/records';
 import {
-    NangoError,
     configService,
     connectionService,
     errorManager,
     getSyncConfigRaw,
     getSyncs,
+    NangoError,
     syncCommandToOperation,
     verifyOwnership
 } from '@nangohq/shared';
@@ -128,11 +128,11 @@ class SyncController {
             const result = await orchestrator.runSyncCommand({
                 connectionId: connection.id,
                 syncId: sync_id,
+                syncName: sync_name,
                 syncVariant: sync_variant,
                 command,
                 environmentId: environment.id,
                 logCtx,
-                recordsService,
                 initiator: 'UI',
                 delete_records
             });

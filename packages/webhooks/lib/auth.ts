@@ -1,11 +1,12 @@
-import { OtlpSpan, logContextGetter } from '@nangohq/logs';
+import { logContextGetter, OtlpSpan } from '@nangohq/logs';
 import { metrics } from '@nangohq/utils';
 
-import { deliver, shouldSend } from './utils.js';
+import { deliver, resolveWebhookSettings, shouldSend } from './utils.js';
 
 import type {
     AuthModeType,
     AuthOperationType,
+    DBAPISecret,
     DBConnection,
     DBEnvironment,
     DBExternalWebhook,
@@ -27,6 +28,7 @@ const AUTH_OPERATION_TO_TYPE = {
 export async function sendAuth({
     connection,
     environment,
+    secret,
     webhookSettings,
     auth_mode,
     success,
@@ -36,8 +38,9 @@ export async function sendAuth({
     providerConfig,
     account
 }: {
-    connection: DBConnection | Pick<DBConnection, 'connection_id' | 'provider_config_key'>; // Either a true connection or a fake one
+    connection: DBConnection | (Pick<DBConnection, 'connection_id' | 'provider_config_key'> & Partial<Pick<DBConnection, 'webhook_url_override'>>); // Either a true connection or a fake one
     environment: DBEnvironment;
+    secret: DBAPISecret['secret'];
     webhookSettings: DBExternalWebhook | null;
     auth_mode: AuthModeType;
     success: boolean;
@@ -51,11 +54,13 @@ export async function sendAuth({
         return;
     }
 
+    const settings = resolveWebhookSettings(webhookSettings, 'webhook_url_override' in connection ? connection.webhook_url_override : null);
+
     if (operation === 'unknown') {
         return;
     }
 
-    if (!shouldSend({ success, type: AUTH_OPERATION_TO_TYPE[operation], webhookSettings })) {
+    if (!shouldSend({ success, type: AUTH_OPERATION_TO_TYPE[operation], webhookSettings: settings })) {
         return;
     }
 
@@ -71,6 +76,7 @@ export async function sendAuth({
         provider: providerConfig?.provider || 'unknown',
         environment: environment.name,
         operation,
+        tags: 'tags' in connection ? (connection.tags ?? undefined) : undefined,
         endUser: endUser
             ? {
                   endUserId: endUser.endUserId,
@@ -95,11 +101,11 @@ export async function sendAuth({
     }
 
     const webhooks: { url: string; type: string }[] = [];
-    if (webhookSettings.primary_url) {
-        webhooks.push({ url: webhookSettings.primary_url, type: 'webhook url' });
+    if (settings.primary_url) {
+        webhooks.push({ url: settings.primary_url, type: 'webhook url' });
     }
-    if (webhookSettings.secondary_url) {
-        webhooks.push({ url: webhookSettings.secondary_url, type: 'secondary webhook url' });
+    if (settings.secondary_url) {
+        webhooks.push({ url: settings.secondary_url, type: 'secondary webhook url' });
     }
 
     const action = operation === 'creation' ? 'connection_create' : 'connection_refresh';
@@ -118,7 +124,7 @@ export async function sendAuth({
         webhooks,
         body: success ? successBody : errorBody,
         webhookType: 'auth',
-        environment,
+        secret,
         logCtx
     });
 

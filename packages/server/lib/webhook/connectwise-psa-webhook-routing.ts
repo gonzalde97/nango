@@ -1,6 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from 'crypto';
 
-import { Err, Ok, axiosInstance } from '@nangohq/utils';
+import { axiosInstance, Err, Ok } from '@nangohq/utils';
 
 import type { ConnectWisePsaWebhookPayload, WebhookHandler } from './types.js';
 import type { Result } from '@nangohq/utils';
@@ -13,7 +13,7 @@ interface SigningKeyResponse {
  * Known trusted ConnectWise subdomains.
  * These are the official ConnectWise PSA API endpoints.
  */
-const TRUSTED_CONNECTWISE_SUBDOMAINS = new Set(['api-au', 'api-eu', 'api-na', 'sandbox-au', 'sandbox-eu', 'sandbox-na']);
+const TRUSTED_CONNECTWISE_SUBDOMAINS = new Set(['api-au', 'api-eu', 'api-na', 'sandbox-au', 'sandbox-eu', 'sandbox-na', 'na', 'eu', 'au']);
 
 /**
  * Validates that a URL is from a trusted ConnectWise subdomain.
@@ -135,7 +135,9 @@ const route: WebhookHandler<ConnectWisePsaWebhookPayload> = async (nango, header
 
     const response = await nango.executeScriptForWebhooks({
         body,
-        webhookType: 'Type' // ConnectWise webhook type field
+        webhookType: 'Type',
+        connectionIdentifier: 'ProductInstanceId',
+        propName: 'metadata.productInstanceId'
     });
 
     return Ok({

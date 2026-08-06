@@ -17,39 +17,34 @@ import type {
     UpdateSyncFrequencyResponse
 } from './types.js';
 import type {
-    ApiKeyCredentials,
+    ApiPublicAllAuthCredentials,
     ApiPublicConnection,
     ApiPublicIntegration,
-    AppCredentials,
-    AppStoreCredentials,
-    BasicApiCredentials,
-    BillCredentials,
     CredentialsCommon,
-    CustomCredentials,
+    DeletePublicIntegrationFunction,
     DeleteSyncVariant,
     GetPublicConnection,
     GetPublicConnections,
     GetPublicEnvironmentVariables,
+    GetPublicFunctionCode,
     GetPublicIntegration,
+    GetPublicIntegrationFunction,
+    GetPublicIntegrationFunctions,
     GetPublicListIntegrations,
     GetPublicProvider,
     GetPublicProviders,
-    JwtCredentials,
+    GetPublicProviderTemplates,
     NangoRecord,
     OAuth1Token,
-    OAuth2ClientCredentials,
     OpenAIFunction,
     PatchPublicConnection,
     PatchPublicIntegration,
     PostConnectSessions,
     PostPublicConnectSessionsReconnect,
     PostPublicIntegration,
+    PostPublicQuickstartIntegration,
     PostPublicTrigger,
-    PostSyncVariant,
-    SignatureCredentials,
-    TbaCredentials,
-    TwoStepCredentials,
-    UnauthCredentials
+    PostSyncVariant
 } from '@nangohq/types';
 import type { AxiosInstance, AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
 
@@ -64,6 +59,7 @@ const defaultHttpsAgent = new https.Agent({ keepAlive: true });
 
 export interface AdminAxiosProps {
     userAgent?: string;
+    httpsAgent?: https.Agent;
     interceptors?: {
         request?: (config: InternalAxiosRequestConfig) => InternalAxiosRequestConfig;
         response?: {
@@ -75,7 +71,12 @@ export interface AdminAxiosProps {
 
 export class Nango {
     serverUrl: string;
-    secretKey: string;
+    apiKey: string;
+    /**
+     * @deprecated Use `apiKey` instead.
+     */
+    secretKey?: string | undefined;
+    webhookSigningKey?: string | undefined;
     connectionId?: string;
     providerConfigKey?: string;
     isSync = false;
@@ -85,7 +86,7 @@ export class Nango {
     userAgent: string;
     http: AxiosInstance;
 
-    constructor(config: NangoProps, { userAgent, interceptors }: AdminAxiosProps = {}) {
+    constructor(config: NangoProps, { userAgent, httpsAgent, interceptors }: AdminAxiosProps = {}) {
         config.host = config.host || prodHost;
         this.serverUrl = config.host;
 
@@ -93,8 +94,13 @@ export class Nango {
             this.serverUrl = this.serverUrl.slice(0, -1);
         }
 
-        if (!config.secretKey) {
-            throw new Error('You must specify a secret key (cf. documentation).');
+        if (config.apiKey && config.secretKey) {
+            throw new Error('You must specify only one of apiKey or secretKey, not both (cf. documentation).');
+        }
+
+        const apiKey = config.apiKey ?? config.secretKey;
+        if (!apiKey) {
+            throw new Error('You must specify an API key (cf. documentation).');
         }
 
         try {
@@ -103,7 +109,9 @@ export class Nango {
             throw new Error(`Invalid URL provided for the Nango host: ${this.serverUrl}`);
         }
 
+        this.apiKey = apiKey;
         this.secretKey = config.secretKey;
+        this.webhookSigningKey = config.webhookSigningKey;
         this.connectionId = config.connectionId || '';
         this.providerConfigKey = config.providerConfigKey || '';
 
@@ -125,7 +133,7 @@ export class Nango {
 
         this.userAgent = getUserAgent(userAgent);
         this.http = axios.create({
-            httpsAgent: defaultHttpsAgent,
+            httpsAgent: httpsAgent ?? defaultHttpsAgent,
             headers: {
                 'User-Agent': this.userAgent
             }
@@ -160,6 +168,16 @@ export class Nango {
      */
     public async getProvider(params: GetPublicProvider['Params']): Promise<GetPublicProvider['Success']> {
         const response = await this.http.get(`${this.serverUrl}/providers/${params.provider}`, { headers: this.enrichHeaders({}) });
+        return response.data;
+    }
+
+    /**
+     * Returns the function templates available for a provider
+     * @param params - Identifies the provider (`provider`)
+     * @returns A promise that resolves with the provider's function templates
+     */
+    public async getProviderTemplates(params: GetPublicProviderTemplates['Params']): Promise<GetPublicProviderTemplates['Success']> {
+        const response = await this.http.get(`${this.serverUrl}/providers/${params.provider}/templates`, { headers: this.enrichHeaders({}) });
         return response.data;
     }
 
@@ -206,6 +224,12 @@ export class Nango {
         return response.data;
     }
 
+    public async createQuickstartIntegration(body: PostPublicQuickstartIntegration['Body']): Promise<PostPublicQuickstartIntegration['Success']> {
+        const url = `${this.serverUrl}/integrations/quickstart`;
+        const response = await this.http.post(url, body, { headers: this.enrichHeaders({}) });
+        return response.data;
+    }
+
     public async updateIntegration(params: PatchPublicIntegration['Params'], body: PatchPublicIntegration['Body']): Promise<PatchPublicIntegration['Success']> {
         const url = `${this.serverUrl}/integrations/${params.uniqueKey}`;
         const response = await this.http.patch(url, body, { headers: this.enrichHeaders({}) });
@@ -220,6 +244,82 @@ export class Nango {
     public async deleteIntegration(providerConfigKey: string): Promise<AxiosResponse<void>> {
         const url = `${this.serverUrl}/integrations/${providerConfigKey}`;
         return await this.http.delete(url, { headers: this.enrichHeaders({}) });
+    }
+
+    /**
+     * Lists the deployed functions of an integration
+     * @param params - Identifies the integration (`uniqueKey`)
+     * @param queries - Optional filters: `type`, `search`, `page`, `limit`
+     * @returns A promise that resolves with the deployed functions and pagination metadata
+     */
+    public async listFunctions(
+        params: GetPublicIntegrationFunctions['Params'],
+        queries?: GetPublicIntegrationFunctions['Querystring']
+    ): Promise<GetPublicIntegrationFunctions['Success']> {
+        const headers = { 'Content-Type': 'application/json' };
+
+        const url = new URL(`${this.serverUrl}/integrations/${params.uniqueKey}/functions`);
+        addQueryParams(url, queries as GetPublicIntegrationFunctions['Querystring']);
+
+        const response = await this.http.get(url.href, { headers: this.enrichHeaders(headers) });
+        return response.data;
+    }
+
+    /**
+     * Retrieves a deployed function of an integration
+     * @param params - Identifies the function (`uniqueKey`, `name`)
+     * @param queries - Optional `type` to disambiguate when functions share a name
+     * @returns A promise that resolves with the deployed function
+     */
+    public async getFunction(
+        params: GetPublicIntegrationFunction['Params'],
+        queries?: GetPublicIntegrationFunction['Querystring']
+    ): Promise<GetPublicIntegrationFunction['Success']> {
+        const headers = { 'Content-Type': 'application/json' };
+
+        const url = new URL(`${this.serverUrl}/integrations/${params.uniqueKey}/functions/${params.name}`);
+        addQueryParams(url, queries as GetPublicIntegrationFunction['Querystring']);
+
+        const response = await this.http.get(url.href, { headers: this.enrichHeaders(headers) });
+        return response.data;
+    }
+
+    /**
+     * Retrieves the source code of a deployed function
+     * @param params - Identifies the function (`uniqueKey`, `name`)
+     * @param queries - Optional `type` to disambiguate when functions share a name
+     * @returns A promise that resolves with the function type and code
+     */
+    public async getFunctionCode(
+        params: GetPublicFunctionCode['Params'],
+        queries?: GetPublicFunctionCode['Querystring']
+    ): Promise<GetPublicFunctionCode['Success']> {
+        const headers = { 'Content-Type': 'application/json' };
+
+        const url = new URL(`${this.serverUrl}/integrations/${params.uniqueKey}/functions/${params.name}/code`);
+        addQueryParams(url, queries as GetPublicFunctionCode['Querystring']);
+
+        const response = await this.http.get(url.href, { headers: this.enrichHeaders(headers) });
+        return response.data;
+    }
+
+    /**
+     * Deletes a deployed function of an integration
+     * @param params - Identifies the function (`uniqueKey`, `name`)
+     * @param queries - The function `type` (required)
+     * @returns A promise that resolves with the deletion result
+     */
+    public async deleteFunction(
+        params: DeletePublicIntegrationFunction['Params'],
+        queries: DeletePublicIntegrationFunction['Querystring']
+    ): Promise<DeletePublicIntegrationFunction['Success']> {
+        const headers = { 'Content-Type': 'application/json' };
+
+        const url = new URL(`${this.serverUrl}/integrations/${params.uniqueKey}/functions/${params.name}`);
+        addQueryParams(url, queries as DeletePublicIntegrationFunction['Querystring']);
+
+        const response = await this.http.delete(url.href, { headers: this.enrichHeaders(headers) });
+        return response.data;
     }
 
     /**
@@ -250,14 +350,15 @@ export class Nango {
 
     /**
      * Returns a list of connections using object parameter syntax
-     * @param params - Object containing optional filter parameters
+     * @param params - Object containing optional filter parameters. `tags.displayName` and `tags.email` are legacy aliases mapped to `end_user_display_name` and `end_user_email`; other tag keys are sent as `tags[<lowercased-key>]`.
      * @returns A promise that resolves with an array of connection objects
      */
     public async listConnections(params: {
         connectionId?: string;
         userId?: string;
         integrationId?: string | string[];
-        tags?: Record<'displayName' | 'email', string>;
+        tags?: Record<string, string>;
+        limit?: number;
     }): Promise<GetPublicConnections['Success']>;
 
     public async listConnections(
@@ -267,7 +368,9 @@ export class Nango {
                   connectionId?: string;
                   userId?: string;
                   integrationId?: string | string[];
-                  tags?: Record<'displayName' | 'email', string>;
+                  tags?: Record<string, string>;
+                  limit?: number;
+                  page?: number;
               },
         search?: string,
         queries?: Omit<GetPublicConnections['Querystring'], 'connectionId' | 'search'>
@@ -277,7 +380,7 @@ export class Nango {
         // Handle both call signatures
         if (typeof connectionIdOrParams === 'object') {
             // New object parameter syntax
-            const { connectionId, userId, integrationId, tags } = connectionIdOrParams;
+            const { connectionId, userId, integrationId, tags, limit, page } = connectionIdOrParams;
 
             if (connectionId) {
                 url.searchParams.append('connectionId', connectionId);
@@ -289,12 +392,21 @@ export class Nango {
                 url.searchParams.append('integrationId', Array.isArray(integrationId) ? integrationId.join(',') : integrationId);
             }
             if (tags && Object.keys(tags).length > 0) {
-                if (tags['displayName']) {
-                    url.searchParams.append('search', tags['displayName']);
+                for (const [key, value] of Object.entries(tags)) {
+                    if (key === 'displayName') {
+                        url.searchParams.append('tags[end_user_display_name]', value);
+                    } else if (key === 'email') {
+                        url.searchParams.append('tags[end_user_email]', value);
+                    } else {
+                        url.searchParams.append(`tags[${key.toLowerCase()}]`, value);
+                    }
                 }
-                if (tags['email']) {
-                    url.searchParams.append('email', tags['email']);
-                }
+            }
+            if (limit) {
+                url.searchParams.append('limit', limit.toString());
+            }
+            if (page) {
+                url.searchParams.append('page', page.toString());
             }
         } else {
             // Legacy parameter syntax
@@ -309,6 +421,12 @@ export class Nango {
             }
             if (queries?.endUserOrganizationId) {
                 url.searchParams.append('endUserOrganizationId', queries.endUserOrganizationId);
+            }
+            if (queries?.limit) {
+                url.searchParams.append('limit', queries.limit.toString());
+            }
+            if (queries?.page) {
+                url.searchParams.append('page', queries.page.toString());
             }
         }
 
@@ -367,22 +485,7 @@ export class Nango {
         connectionId: string,
         forceRefresh?: boolean,
         refreshGithubAppJwtToken?: boolean
-    ): Promise<
-        | string
-        | OAuth1Token
-        | BasicApiCredentials
-        | ApiKeyCredentials
-        | AppCredentials
-        | OAuth2ClientCredentials
-        | AppStoreCredentials
-        | UnauthCredentials
-        | CustomCredentials
-        | TbaCredentials
-        | JwtCredentials
-        | BillCredentials
-        | TwoStepCredentials
-        | SignatureCredentials
-    > {
+    ): Promise<string | OAuth1Token | ApiPublicAllAuthCredentials> {
         const response = await this.getConnectionDetails({ providerConfigKey, connectionId, forceRefresh, refreshGithubAppJwtToken });
 
         switch (response.data.credentials.type) {
@@ -642,14 +745,32 @@ export class Nango {
      * @param providerConfigKey - The key identifying the provider configuration on Nango
      * @param syncs - An optional array of sync names or sync names/variants to trigger. If empty, all applicable syncs will be triggered
      * @param connectionId - An optional ID of the connection for which to trigger the syncs. If not provided, syncs will be triggered for all applicable connections
-     * @param syncMode - An optional flag indicating whether to perform an incremental or full resync. Defaults to 'incremental`
+     * @param opts - Options for sync trigger. Use `reset: true` for a full resync, `emptyCache: true` to clear records
      * @returns A promise that resolves when the sync trigger request is sent
      */
     public async triggerSync(
         providerConfigKey: string,
         syncs?: (string | { name: string; variant: string })[],
         connectionId?: string,
-        syncMode?: PostPublicTrigger['Body']['sync_mode'] | boolean // boolean kept for backwards compatibility
+        opts?: PostPublicTrigger['Body']['opts']
+    ): Promise<void>;
+
+    /**
+     * @deprecated Use opts parameter instead of syncMode
+     */
+    public async triggerSync(
+        providerConfigKey: string,
+        syncs?: (string | { name: string; variant: string })[],
+        connectionId?: string,
+        // eslint-disable-next-line @typescript-eslint/unified-signatures
+        syncMode?: PostPublicTrigger['Body']['sync_mode'] | PostPublicTrigger['Body']['full_resync']
+    ): Promise<void>;
+
+    public async triggerSync(
+        providerConfigKey: string,
+        syncs?: (string | { name: string; variant: string })[],
+        connectionId?: string,
+        optsOrSyncMode?: PostPublicTrigger['Body']['opts'] | PostPublicTrigger['Body']['sync_mode'] | PostPublicTrigger['Body']['full_resync']
     ): Promise<void> {
         const url = `${this.serverUrl}/sync/trigger`;
 
@@ -657,18 +778,31 @@ export class Nango {
             throw new Error('Syncs must be an array. If it is a single sync, please wrap it in an array.');
         }
 
-        if (typeof syncMode === 'boolean') {
-            syncMode = syncMode ? 'full_refresh' : 'incremental';
+        const isOpts = optsOrSyncMode !== undefined && typeof optsOrSyncMode === 'object';
+        const isLegacy = typeof optsOrSyncMode === 'string' || typeof optsOrSyncMode === 'boolean';
+
+        let body: PostPublicTrigger['Body'];
+
+        if (isLegacy) {
+            let syncMode: PostPublicTrigger['Body']['sync_mode'] = optsOrSyncMode as PostPublicTrigger['Body']['sync_mode'];
+            if (typeof optsOrSyncMode === 'boolean') {
+                syncMode = optsOrSyncMode ? 'full_refresh' : 'incremental';
+            }
+            body = {
+                syncs: syncs || [],
+                provider_config_key: providerConfigKey,
+                connection_id: connectionId,
+                sync_mode: syncMode
+            };
+        } else {
+            const opts = isOpts ? optsOrSyncMode : undefined;
+            body = {
+                syncs: syncs || [],
+                provider_config_key: providerConfigKey,
+                connection_id: connectionId,
+                opts
+            };
         }
-
-        syncMode ??= 'incremental';
-
-        const body = {
-            syncs: syncs || [],
-            provider_config_key: providerConfigKey,
-            connection_id: connectionId,
-            sync_mode: syncMode
-        };
 
         return this.http.post(url, body, { headers: this.enrichHeaders() });
     }
@@ -1039,7 +1173,17 @@ export class Nango {
 
         validateProxyConfiguration(config);
 
-        const { providerConfigKey, connectionId, method, retries, headers: customHeaders, baseUrlOverride, decompress, retryOn } = config;
+        const {
+            providerConfigKey,
+            connectionId,
+            method,
+            retries,
+            headers: customHeaders,
+            baseUrlOverride,
+            decompress,
+            retryOn,
+            forwardHeadersOnRedirect
+        } = config;
 
         let url = `${this.serverUrl}/proxy${config.endpoint[0] === '/' ? '' : '/'}${config.endpoint}`;
 
@@ -1073,6 +1217,10 @@ export class Nango {
 
         if (retryOn) {
             headers['Retry-On'] = retryOn.join(',');
+        }
+
+        if (forwardHeadersOnRedirect !== undefined) {
+            headers['Forward-Headers-On-Redirect'] = forwardHeadersOnRedirect;
         }
 
         const options: AxiosRequestConfig = {
@@ -1191,10 +1339,14 @@ export class Nango {
     }
 
     private _verifyWebhookSignatureImpl(signatureInHeader: string, jsonPayload: unknown): boolean {
+        const signingKey = this.webhookSigningKey ?? this.secretKey;
+        if (!signingKey) {
+            return false;
+        }
         return (
             crypto
                 .createHash('sha256')
-                .update(`${this.secretKey}${JSON.stringify(jsonPayload)}`)
+                .update(`${signingKey}${JSON.stringify(jsonPayload)}`)
                 .digest('hex') === signatureInHeader
         );
     }
@@ -1202,6 +1354,11 @@ export class Nango {
     /**
      *
      * Verify incoming webhooks request
+     *
+     * Uses `webhookSigningKey` when provided, otherwise falls back to the deprecated `secretKey`.
+     * The API key is never used to sign webhooks, so a client constructed with `apiKey` must also
+     * set `webhookSigningKey`; otherwise this returns false. On environments created after 2026-04-20
+     * (or any environment that later rotated its API key), the signing key differs from the API key.
      *
      * @param body - The raw HTTP body as a string
      * @param headers - The HTTP headers including X-Nango-Hmac-Sha256
@@ -1213,7 +1370,12 @@ export class Nango {
             return false;
         }
 
-        const expectedSignature = crypto.createHmac('sha256', this.secretKey).update(body).digest('hex');
+        const signingKey = this.webhookSigningKey ?? this.secretKey;
+        if (!signingKey) {
+            return false;
+        }
+
+        const expectedSignature = crypto.createHmac('sha256', signingKey).update(body).digest('hex');
         const actualSignature = headers[signatureInHeader];
 
         if (typeof actualSignature !== 'string') {
@@ -1310,7 +1472,7 @@ export class Nango {
      * @returns The enriched headers
      */
     private enrichHeaders(headers: Record<string, string | number | boolean> = {}): Record<string, string | number | boolean> {
-        headers['Authorization'] = 'Bearer ' + this.secretKey;
+        headers['Authorization'] = 'Bearer ' + this.apiKey;
         headers['Nango-Is-Sync'] = this.isSync;
         headers['Nango-Is-Script'] = this.isScript;
         headers['Nango-Is-Dry-Run'] = this.dryRun;

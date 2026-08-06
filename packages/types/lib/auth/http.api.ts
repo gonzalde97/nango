@@ -1,4 +1,4 @@
-import type { ApiError, Endpoint } from '../api.js';
+import type { ApiEndpoint, ApiError } from '../api.js';
 
 export type ConnectionQueryString = {
     connection_id?: string | undefined;
@@ -50,7 +50,8 @@ type AuthErrors =
     | ApiError<'connection_test_failed'>
     | ApiError<'connection_validation_failed'>;
 
-export type PostPublicApiKeyAuthorization = Endpoint<{
+export type PostPublicApiKeyAuthorization = ApiEndpoint<{
+    Audit: { kind: 'no-audit'; reason: 'TODO: audit coverage pending' };
     Method: 'POST';
     Body: {
         apiKey: string;
@@ -64,24 +65,8 @@ export type PostPublicApiKeyAuthorization = Endpoint<{
     Success: ConnectionResponseSuccess;
 }>;
 
-export type PostPublicAppStoreAuthorization = Endpoint<{
-    Method: 'POST';
-    Body: {
-        privateKeyId: string;
-        privateKey: string;
-        issuerId: string;
-        scope?: string | undefined;
-    };
-    Querystring: ConnectionQueryString;
-    Params: {
-        providerConfigKey: string;
-    };
-    Path: '/app-store-auth/:providerConfigKey';
-    Error: AuthErrors;
-    Success: ConnectionResponseSuccess;
-}>;
-
-export type PostPublicBasicAuthorization = Endpoint<{
+export type PostPublicBasicAuthorization = ApiEndpoint<{
+    Audit: { kind: 'no-audit'; reason: 'TODO: audit coverage pending' };
     Method: 'POST';
     Body: {
         username: string;
@@ -96,13 +81,15 @@ export type PostPublicBasicAuthorization = Endpoint<{
     Success: ConnectionResponseSuccess;
 }>;
 
-export type PostPublicTbaAuthorization = Endpoint<{
+export type PostPublicTbaAuthorization = ApiEndpoint<{
+    Audit: { kind: 'no-audit'; reason: 'TODO: audit coverage pending' };
     Method: 'POST';
     Body: {
         token_id: string;
         token_secret: string;
         oauth_client_id_override?: string | undefined;
         oauth_client_secret_override?: string | undefined;
+        oauth_refresh_token_override?: string | undefined;
     };
     Querystring: ConnectionQueryString;
     Params: {
@@ -113,7 +100,8 @@ export type PostPublicTbaAuthorization = Endpoint<{
     Success: ConnectionResponseSuccess;
 }>;
 
-export type PostPublicJwtAuthorization = Endpoint<{
+export type PostPublicJwtAuthorization = ApiEndpoint<{
+    Audit: { kind: 'no-audit'; reason: 'TODO: audit coverage pending' };
     Method: 'POST';
     Body: Record<string, any>;
     Querystring: ConnectionQueryString;
@@ -125,7 +113,8 @@ export type PostPublicJwtAuthorization = Endpoint<{
     Success: ConnectionResponseSuccess;
 }>;
 
-export type PostPublicUnauthenticatedAuthorization = Endpoint<{
+export type PostPublicUnauthenticatedAuthorization = ApiEndpoint<{
+    Audit: { kind: 'no-audit'; reason: 'TODO: audit coverage pending' };
     Method: 'POST';
     Querystring: ConnectionQueryString;
     Params: {
@@ -136,7 +125,8 @@ export type PostPublicUnauthenticatedAuthorization = Endpoint<{
     Success: ConnectionResponseSuccess;
 }>;
 
-export type PostPublicBillAuthorization = Endpoint<{
+export type PostPublicBillAuthorization = ApiEndpoint<{
+    Audit: { kind: 'no-audit'; reason: 'TODO: audit coverage pending' };
     Method: 'POST';
     Body: {
         username: string;
@@ -153,7 +143,8 @@ export type PostPublicBillAuthorization = Endpoint<{
     Success: ConnectionResponseSuccess;
 }>;
 
-export type PostPublicTwoStepAuthorization = Endpoint<{
+export type PostPublicTwoStepAuthorization = ApiEndpoint<{
+    Audit: { kind: 'no-audit'; reason: 'TODO: audit coverage pending' };
     Method: 'POST';
     Body: Record<string, any>;
     Querystring: ConnectionQueryString;
@@ -165,7 +156,8 @@ export type PostPublicTwoStepAuthorization = Endpoint<{
     Success: ConnectionResponseSuccess;
 }>;
 
-export type PostPublicSignatureAuthorization = Endpoint<{
+export type PostPublicSignatureAuthorization = ApiEndpoint<{
+    Audit: { kind: 'no-audit'; reason: 'TODO: audit coverage pending' };
     Method: 'POST';
     Body: {
         username: string;
@@ -180,7 +172,33 @@ export type PostPublicSignatureAuthorization = Endpoint<{
     Success: ConnectionResponseSuccess;
 }>;
 
-export type PostPublicOauthOutboundAuthorization = Endpoint<{
+type AwsSigV4AuthErrors =
+    | AuthErrors
+    | ApiError<'invalid_aws_sigv4_config'>
+    | ApiError<'missing_aws_sigv4_service'>
+    | ApiError<'missing_aws_sigv4_sts_endpoint'>
+    | ApiError<'missing_aws_sigv4_builtin_credentials'>
+    | ApiError<'missing_aws_sigv4_region'>
+    | ApiError<'aws_sigv4_sts_request_failed'>;
+
+export type PostPublicAwsSigV4Authorization = ApiEndpoint<{
+    Audit: { kind: 'no-audit'; reason: 'TODO: audit coverage pending' };
+    Method: 'POST';
+    Body: {
+        role_arn: string;
+        region?: string | undefined;
+    };
+    Querystring: ConnectionQueryString;
+    Params: {
+        providerConfigKey: string;
+    };
+    Path: '/auth/aws-sigv4/:providerConfigKey';
+    Error: AwsSigV4AuthErrors;
+    Success: ConnectionResponseSuccess;
+}>;
+
+export type PostPublicOauthOutboundAuthorization = ApiEndpoint<{
+    Audit: { kind: 'no-audit'; reason: 'TODO: audit coverage pending' };
     Method: 'POST';
     Body: {
         username: string;

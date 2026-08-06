@@ -23,6 +23,21 @@ This guide shows you how to register your own app with Slack to obtain your OAut
     - Bot tokens represent a bot associated with an app installed in a workspace. They govern what your app can access. They will be added to Nango when creating a Slack integration.
     - User token Scopes access user data and act on behalf of users that authorize them. They will be [added](/reference/api/connect/sessions/create#body-integrations-config-defaults-key-user_scopes) to Nango when creating a Slack connection.
   </Step>
+  <Step title="Enable token rotation">
+    Nango supports automatic token refresh for Slack. To use it, enable token rotation in your app manifest:
+
+    1. In the left sidebar, go to **App Manifest**.
+    2. Set `token_rotation_enabled` to `true` under the top-level `settings` section:
+
+    ```yaml
+    settings:
+      token_rotation_enabled: true
+    ```
+
+    When enabled, Slack issues short-lived access tokens alongside refresh tokens. Nango automatically refreshes both the bot token and the user token before they expire — no action required on your end.
+
+    If token rotation is disabled, access tokens do not expire and Nango will not attempt to refresh them.
+  </Step>
   <Step title="Create a Slack Developer Sandbox (Optional)">
     If you don't have a Slack Developer Sandbox already, head over to Slack's [Developer Program dashboard](https://api.slack.com/developer-program/dashboard) and provision one to test your integration.
   </Step>
@@ -30,66 +45,6 @@ This guide shows you how to register your own app with Slack to obtain your OAut
     Follow the [_Quickstart_](/getting-started/quickstart).
   </Step>
 </Steps>
-
-### Bot Token vs User Token
-
-Slack issues two separate access tokens during OAuth:
-- **Bot Token** (starts with `xoxb-`): Used for actions performed by your app's bot
-- **User Token** (starts with `xoxp-`): Used for actions performed on behalf of the authorizing user
-
-**Important:** By default, Nango uses the bot token as the primary access token. This means when you make API calls through Nango's proxy, it will use the bot token by default.
-
-#### When You Need the User Token
-
-Some Slack API endpoints require user-scoped permissions and will only accept user tokens (e.g., certain user profile operations). If you try to call these endpoints with the bot token, Slack will reject the request.
-
-#### How to Use the User Token
-
-1. **Fetch the raw connection to get the user token:**
-
-```typescript
-import { Nango } from '@nangohq/node';
-
-const nango = new Nango({ secretKey: '<NANGO-SECRET-KEY>' });
-
-// Fetch the connection with raw credentials
-const connection = await nango.getConnection(
-  '<INTEGRATION-ID>',
-  '<CONNECTION-ID>'
-);
-
-// The user token is in the raw response
-const userToken = connection.credentials.raw.authed_user?.access_token;
-```
-
-2. **Override the authorization header when making proxy calls:**
-
-```typescript
-// Use the user token by overriding the auth header
-const response = await nango.get({
-  endpoint: '/users.profile.get',
-  providerConfigKey: '<INTEGRATION-ID>',
-  connectionId: '<CONNECTION-ID>',
-  headers: {
-    'nango-proxy-authorization': `Bearer ${userToken}`
-  }
-});
-```
-
-#### When Creating Connections in Nango
-
-If you need user tokens for your integration, you can specify [user scopes](/reference/api/connect/sessions/create#body-integrations-config-defaults-key-user_scopes) when creating a connect session:
-
-```typescript
-const { data } = await nango.createConnectSession({
-  end_user_id: '<END-USER-ID>',
-  integrations_config_defaults: {
-    "slack": {
-      user_scopes: "users.profile:read, chat:write"
-    }
-  }
-});
-```
 
 For more details on Slack's OAuth implementation, see [Slack's OAuth documentation](https://api.slack.com/authentication/oauth-v2).
 

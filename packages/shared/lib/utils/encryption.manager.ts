@@ -4,16 +4,16 @@ import utils from 'node:util';
 import db from '@nangohq/database';
 import { Encryption, getLogger } from '@nangohq/utils';
 
+import { dek } from '../env.js';
 import { isConnectionJsonRow } from '../services/connections/utils.js';
-import { hashSecretKey } from '../services/environment.service.js';
+import secretService from '../services/secret.service.js';
 
 import type { Config as ProviderConfig } from '../models/Provider.js';
-import type { DBConfig, DBConnection, DBConnectionAsJSONRow, DBConnectionDecrypted, DBEnvironment, DBEnvironmentVariable } from '@nangohq/types';
+import type { DBAPISecret, DBConfig, DBConnection, DBConnectionAsJSONRow, DBConnectionDecrypted, DBCustomerKey, DBEnvironmentVariable } from '@nangohq/types';
 
 const logger = getLogger('Encryption.Manager');
 
 export const pbkdf2 = utils.promisify(crypto.pbkdf2);
-export const ENCRYPTION_KEY = process.env['NANGO_ENCRYPTION_KEY'] || '';
 
 export class EncryptionManager extends Encryption {
     private keySalt = 'X89FHEGqR3yNK0+v7rPWxQ==';
@@ -22,48 +22,20 @@ export class EncryptionManager extends Encryption {
         return Boolean(this?.key && this.key.length > 0);
     }
 
-    public async encryptEnvironment(environment: DBEnvironment) {
-        if (!this.shouldEncrypt()) {
-            return environment;
+    public decryptAPISecret<T extends Pick<DBAPISecret, 'secret' | 'iv' | 'tag'>>(secret: T): T & { iv: ''; tag: '' } {
+        if (!this.shouldEncrypt() || !secret.iv || !secret.tag) {
+            return {
+                ...secret,
+                iv: '',
+                tag: ''
+            };
         }
-
-        const encryptedEnvironment: DBEnvironment = Object.assign({}, environment);
-
-        const [encryptedClientSecret, iv, authTag] = this.encryptSync(environment.secret_key);
-        encryptedEnvironment.secret_key_hashed = await hashSecretKey(environment.secret_key);
-        encryptedEnvironment.secret_key = encryptedClientSecret;
-        encryptedEnvironment.secret_key_iv = iv;
-        encryptedEnvironment.secret_key_tag = authTag;
-
-        if (encryptedEnvironment.pending_secret_key) {
-            const [encryptedPendingClientSecret, pendingIv, pendingAuthTag] = this.encryptSync(encryptedEnvironment.pending_secret_key);
-            encryptedEnvironment.pending_secret_key = encryptedPendingClientSecret;
-            encryptedEnvironment.pending_secret_key_iv = pendingIv;
-            encryptedEnvironment.pending_secret_key_tag = pendingAuthTag;
-        }
-
-        return encryptedEnvironment;
-    }
-
-    public decryptEnvironment<TEnv extends DBEnvironment | null>(environment: TEnv): TEnv {
-        // Check if the individual row is encrypted.
-        if (environment == null || environment.secret_key_iv == null || environment.secret_key_tag == null) {
-            return environment;
-        }
-
-        const decryptedEnvironment: TEnv = Object.assign({}, environment);
-
-        decryptedEnvironment.secret_key = this.decryptSync(environment.secret_key, environment.secret_key_iv, environment.secret_key_tag);
-
-        if (decryptedEnvironment.pending_secret_key) {
-            decryptedEnvironment.pending_secret_key = this.decryptSync(
-                environment.pending_secret_key as string,
-                environment.pending_secret_key_iv as string,
-                environment.pending_secret_key_tag as string
-            );
-        }
-
-        return decryptedEnvironment;
+        return {
+            ...secret,
+            secret: this.decryptSync(secret.secret, secret.iv, secret.tag),
+            iv: '',
+            tag: ''
+        };
     }
 
     public encryptConnection(connection: Omit<DBConnectionDecrypted, 'end_user_id' | 'credentials_iv' | 'credentials_tag'>): Omit<DBConnection, 'end_user_id'> {
@@ -146,14 +118,12 @@ export class EncryptionManager extends Encryption {
 
         const encryptedConfig: ProviderConfig = Object.assign({}, config);
 
-        if (!config.oauth_client_secret) {
-            return config;
+        if (config.oauth_client_secret) {
+            const [encryptedClientSecret, iv, authTag] = this.encryptSync(config.oauth_client_secret);
+            encryptedConfig.oauth_client_secret = encryptedClientSecret;
+            encryptedConfig.oauth_client_secret_iv = iv;
+            encryptedConfig.oauth_client_secret_tag = authTag;
         }
-
-        const [encryptedClientSecret, iv, authTag] = this.encryptSync(config.oauth_client_secret);
-        encryptedConfig.oauth_client_secret = encryptedClientSecret;
-        encryptedConfig.oauth_client_secret_iv = iv;
-        encryptedConfig.oauth_client_secret_tag = authTag;
 
         if (config.custom) {
             const [encryptedValue, iv, authTag] = this.encryptSync(JSON.stringify(config.custom));
@@ -164,8 +134,20 @@ export class EncryptionManager extends Encryption {
     }
 
     public decryptProviderConfig(config: ProviderConfig | null): ProviderConfig | null {
+        if (config == null) {
+            return config;
+        }
+
+        if (config.custom && typeof config.custom === 'object' && 'encryptedValue' in config.custom && config.oauth_client_secret_iv == null) {
+            const decryptedConfig: ProviderConfig = Object.assign({}, config);
+            decryptedConfig.custom = JSON.parse(
+                this.decryptSync(config.custom['encryptedValue'], config.custom['iv'] as string, config.custom['authTag'] as string)
+            );
+            return decryptedConfig;
+        }
+
         // Check if the individual row is encrypted.
-        if (config == null || config.oauth_client_secret_iv == null || config.oauth_client_secret_tag == null) {
+        if (config.oauth_client_secret_iv == null || config.oauth_client_secret_tag == null) {
             return config;
         }
 
@@ -186,8 +168,10 @@ export class EncryptionManager extends Encryption {
         await db.knex.from<DBConfig>(`_nango_db_config`).insert(dbConfig);
     }
 
+    private static readonly KEY_HASH_ITERATIONS = 310_000;
+
     private async hashEncryptionKey(key: string, salt: string): Promise<string> {
-        const keyBuffer = await pbkdf2(key, salt, 310000, 32, 'sha256');
+        const keyBuffer = await pbkdf2(key, salt, EncryptionManager.KEY_HASH_ITERATIONS, 32, 'sha256');
         return keyBuffer.toString(this.encoding);
     }
 
@@ -247,15 +231,19 @@ export class EncryptionManager extends Encryption {
     private async encryptDatabase() {
         logger.info('🔐⚙️ Starting encryption of database...');
 
-        const environments: DBEnvironment[] = await db.knex.select('*').from<DBEnvironment>(`_nango_environments`);
-
-        for (let environment of environments) {
-            if (environment.secret_key_iv && environment.secret_key_tag) {
-                continue;
+        const secrets: DBAPISecret[] = await db.knex.select('*').from<DBAPISecret>(`api_secrets`);
+        for (const secret of secrets) {
+            if (secret.iv && secret.tag) {
+                continue; // Already encrypted.
             }
-
-            environment = await this.encryptEnvironment(environment);
-            await db.knex.from<DBEnvironment>(`_nango_environments`).where({ id: environment.id }).update(environment);
+            const encrypted = this.encryptAPISecret(secret);
+            const hashed = await secretService.hashSecret(secret.secret);
+            if (hashed.isErr()) {
+                throw hashed.error;
+            }
+            encrypted.hashed = hashed.value;
+            encrypted.updated_at = new Date();
+            await db.knex<DBAPISecret>(`api_secrets`).where({ id: secret.id }).update(encrypted);
         }
 
         const connections = await db.knex.select('*').from<DBConnectionDecrypted>(`_nango_connections`);
@@ -295,8 +283,62 @@ export class EncryptionManager extends Encryption {
             await db.knex.from<DBEnvironmentVariable>(`_nango_environment_variables`).where({ id: environmentVariable.id }).update(environmentVariable);
         }
 
+        const customerKeys = await db.knex.select('*').from<DBCustomerKey>('customer_keys');
+        for (const key of customerKeys) {
+            const updates: Partial<DBCustomerKey> = {};
+
+            if (!key.iv || !key.tag) {
+                const encrypted = this.encryptAPISecret(key);
+                const hashed = await secretService.hashSecret(key.secret);
+                if (hashed.isErr()) {
+                    throw hashed.error;
+                }
+                updates.secret = encrypted.secret;
+                updates.iv = encrypted.iv;
+                updates.tag = encrypted.tag;
+                updates.hashed = hashed.value;
+            }
+
+            if (key.sandbox_signing_secret && (!key.sandbox_signing_secret_iv || !key.sandbox_signing_secret_tag)) {
+                const [encrypted, iv, tag] = this.encryptSync(key.sandbox_signing_secret);
+                updates.sandbox_signing_secret = encrypted;
+                updates.sandbox_signing_secret_iv = iv;
+                updates.sandbox_signing_secret_tag = tag;
+            }
+
+            if (Object.keys(updates).length === 0) {
+                continue;
+            }
+
+            updates.updated_at = new Date();
+            await db.knex<DBCustomerKey>('customer_keys').where({ id: key.id }).update(updates);
+        }
+
         logger.info('🔐✅ Encryption of database complete!');
+    }
+
+    encryptAPISecret<T extends Pick<DBAPISecret, 'iv' | 'tag' | 'secret'>>(secret: T): T {
+        if (!this.shouldEncrypt()) {
+            return secret;
+        }
+        if (secret.iv && secret.tag) {
+            return secret; // Already encrypted.
+        }
+        const [encrypted, iv, tag] = this.encryptSync(secret.secret);
+        return {
+            ...secret,
+            secret: encrypted,
+            tag,
+            iv
+        };
     }
 }
 
-export default new EncryptionManager(ENCRYPTION_KEY);
+let instance: EncryptionManager | null = null;
+
+export function getEncryptionManager(): EncryptionManager {
+    if (!instance) {
+        instance = new EncryptionManager(dek.get());
+    }
+    return instance;
+}

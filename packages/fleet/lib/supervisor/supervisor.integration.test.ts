@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Ok } from '@nangohq/utils';
 
-import { STATE_TIMEOUT_MS, Supervisor } from './supervisor.js';
 import { getTestDbClient } from '../db/helpers.test.js';
 import * as deployments from '../models/deployments.js';
 import { generateImage } from '../models/helpers.js';
@@ -10,6 +9,7 @@ import { createNodeWithAttributes } from '../models/helpers.test.js';
 import * as nodeConfigOverrides from '../models/node_config_overrides.js';
 import * as nodes from '../models/nodes.js';
 import { FleetError } from '../utils/errors.js';
+import { STATE_TIMEOUT_MS, Supervisor } from './supervisor.js';
 
 import type { Deployment } from '@nangohq/types';
 
@@ -21,11 +21,16 @@ const mockNodeProvider = {
         storageMb: 1000,
         isTracingEnabled: false,
         isProfilingEnabled: false,
-        idleMaxDurationMs: 1_800_000
+        idleMaxDurationMs: 1_800_000,
+        executionTimeoutSecs: -1,
+        provisionedConcurrency: -1,
+        replicas: 1
     },
     start: vi.fn().mockResolvedValue(Ok(undefined)),
     terminate: vi.fn().mockResolvedValue(Ok(undefined)),
     verifyUrl: vi.fn().mockResolvedValue(Ok(undefined)),
+    finish: vi.fn().mockResolvedValue(Ok(undefined)),
+    waitUntilHealthy: vi.fn().mockResolvedValue(Ok(undefined)),
     mockClear: () => {
         mockNodeProvider.start.mockClear();
         mockNodeProvider.terminate.mockClear();
@@ -34,7 +39,7 @@ const mockNodeProvider = {
 
 describe('Supervisor', () => {
     const dbClient = getTestDbClient('supervisor');
-    const supervisor = new Supervisor({ dbClient, nodeProvider: mockNodeProvider });
+    const supervisor = new Supervisor({ dbClient, nodeProvider: mockNodeProvider, fleetId: 'fleet_id' });
     let previousDeployment: Deployment;
     let activeDeployment: Deployment;
 
@@ -50,8 +55,8 @@ describe('Supervisor', () => {
     });
 
     describe('instances', () => {
-        const supervisor1 = new Supervisor({ dbClient, nodeProvider: mockNodeProvider });
-        const supervisor2 = new Supervisor({ dbClient, nodeProvider: mockNodeProvider });
+        const supervisor1 = new Supervisor({ dbClient, nodeProvider: mockNodeProvider, fleetId: 'fleet_id' });
+        const supervisor2 = new Supervisor({ dbClient, nodeProvider: mockNodeProvider, fleetId: 'fleet_id' });
 
         afterEach(async () => {
             await supervisor1.stop();
@@ -74,8 +79,8 @@ describe('Supervisor', () => {
     });
 
     it('should start PENDING nodes', async () => {
-        const node1 = await createNodeWithAttributes(dbClient.db, { state: 'PENDING', deploymentId: activeDeployment.id });
-        const node2 = await createNodeWithAttributes(dbClient.db, { state: 'PENDING', deploymentId: activeDeployment.id });
+        const node1 = await createNodeWithAttributes(dbClient.db, { state: 'PENDING', deploymentId: activeDeployment.id, fleetId: 'fleet_id' });
+        const node2 = await createNodeWithAttributes(dbClient.db, { state: 'PENDING', deploymentId: activeDeployment.id, fleetId: 'fleet_id' });
 
         await supervisor.tick();
 
@@ -118,7 +123,7 @@ describe('Supervisor', () => {
         expect(nodeAfter.state).toBe('OUTDATED');
     });
     it('should mark nodes with resource override as OUTDATED', async () => {
-        const node = await createNodeWithAttributes(dbClient.db, { state: 'RUNNING', deploymentId: activeDeployment.id });
+        const node = await createNodeWithAttributes(dbClient.db, { state: 'RUNNING', deploymentId: activeDeployment.id, fleetId: 'fleet_id' });
         await nodeConfigOverrides.upsert(dbClient.db, {
             routingId: node.routingId,
             image: node.image,
@@ -137,6 +142,7 @@ describe('Supervisor', () => {
         const newNode = (await nodes.search(dbClient.db, { states: ['PENDING'] })).unwrap().get(node.routingId)?.PENDING[0];
         expect(newNode).toMatchObject({
             state: 'PENDING',
+            fleetId: node.fleetId,
             routingId: node.routingId,
             deploymentId: activeDeployment.id,
             image: node.image,
@@ -144,22 +150,18 @@ describe('Supervisor', () => {
             memoryMb: 1234,
             storageMb: 567890,
             error: null,
-            idleMaxDurationMs: 1_800_000
+            idleMaxDurationMs: 1_800_000,
+            executionTimeoutSecs: -1,
+            provisionedConcurrency: -1,
+            replicas: 1
         });
     });
 
-    it('should mark nodes with image override as OUTDATED', async () => {
-        const node = await createNodeWithAttributes(dbClient.db, { state: 'RUNNING', deploymentId: activeDeployment.id });
-        const imageOverride = `${mockNodeProvider.defaultNodeConfig.image}:12345`;
+    it('should mark nodes with replicas override as OUTDATED', async () => {
+        const node = await createNodeWithAttributes(dbClient.db, { state: 'RUNNING', deploymentId: activeDeployment.id, fleetId: 'fleet_id' });
         await nodeConfigOverrides.upsert(dbClient.db, {
             routingId: node.routingId,
-            image: imageOverride,
-            cpuMilli: node.cpuMilli,
-            memoryMb: node.memoryMb,
-            storageMb: node.storageMb,
-            isTracingEnabled: node.isTracingEnabled,
-            isProfilingEnabled: node.isProfilingEnabled,
-            idleMaxDurationMs: node.idleMaxDurationMs
+            replicas: 3
         });
 
         await supervisor.tick();
@@ -173,6 +175,38 @@ describe('Supervisor', () => {
         expect(newNode).toMatchObject({
             state: 'PENDING',
             routingId: node.routingId,
+            replicas: 3
+        });
+    });
+
+    it('should mark nodes with image override as OUTDATED', async () => {
+        const node = await createNodeWithAttributes(dbClient.db, { state: 'RUNNING', deploymentId: activeDeployment.id, fleetId: 'fleet_id' });
+        const imageOverride = `${mockNodeProvider.defaultNodeConfig.image}:12345`;
+        await nodeConfigOverrides.upsert(dbClient.db, {
+            routingId: node.routingId,
+            image: imageOverride,
+            cpuMilli: node.cpuMilli,
+            memoryMb: node.memoryMb,
+            storageMb: node.storageMb,
+            isTracingEnabled: node.isTracingEnabled,
+            isProfilingEnabled: node.isProfilingEnabled,
+            idleMaxDurationMs: node.idleMaxDurationMs,
+            executionTimeoutSecs: node.executionTimeoutSecs,
+            provisionedConcurrency: node.provisionedConcurrency
+        });
+
+        await supervisor.tick();
+
+        const nodeAfter = (await nodes.get(dbClient.db, node.id)).unwrap();
+        expect(nodeAfter.state).toBe('OUTDATED');
+
+        await supervisor.tick();
+
+        const newNode = (await nodes.search(dbClient.db, { states: ['PENDING'] })).unwrap().get(node.routingId)?.PENDING[0];
+        expect(newNode).toMatchObject({
+            state: 'PENDING',
+            fleetId: node.fleetId,
+            routingId: node.routingId,
             deploymentId: activeDeployment.id,
             image: imageOverride,
             cpuMilli: node.cpuMilli,
@@ -180,7 +214,10 @@ describe('Supervisor', () => {
             storageMb: node.storageMb,
             error: null,
             isTracingEnabled: node.isTracingEnabled,
-            isProfilingEnabled: node.isProfilingEnabled
+            isProfilingEnabled: node.isProfilingEnabled,
+            idleMaxDurationMs: node.idleMaxDurationMs,
+            executionTimeoutSecs: node.executionTimeoutSecs,
+            provisionedConcurrency: node.provisionedConcurrency
         });
     });
 

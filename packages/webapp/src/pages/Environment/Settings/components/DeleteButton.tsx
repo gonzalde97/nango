@@ -1,27 +1,40 @@
-import { IconTrash } from '@tabler/icons-react';
+import { Trash2 } from 'lucide-react';
 
-import { DestructiveActionModal } from '@/components/DestructiveActionModal';
-import { SimpleTooltip } from '@/components/SimpleTooltip';
-import { Button } from '@/components/ui/button/Button';
+import { permissions } from '@nangohq/authz';
+import { Button } from '@nangohq/design-system';
+
+import { ConditionalTooltip } from '@/components/patterns/ConditionalTooltip';
+import { DestructiveActionModal } from '@/components/patterns/DestructiveActionModal';
+import { PermissionGate } from '@/components/patterns/PermissionGate';
+import { useEnvironment } from '@/hooks/useEnvironment';
+import { usePermissions } from '@/hooks/usePermissions';
 
 interface DeleteButtonProps {
     environmentName: string;
     onDelete: () => void;
     open: boolean;
     onOpenChange: (open: boolean) => void;
-    disabled?: boolean;
-    disabledTooltip?: string;
+    disabled?: boolean | string;
 }
 
-export const DeleteButton: React.FC<DeleteButtonProps> = ({ environmentName, onDelete, open, onOpenChange, disabled, disabledTooltip }) => {
-    const tooltipContent = disabled ? disabledTooltip : '';
+export const DeleteButton: React.FC<DeleteButtonProps> = ({ environmentName, onDelete, open, onOpenChange, disabled }) => {
+    const { data } = useEnvironment(environmentName);
+    const environmentAndAccount = data?.environmentAndAccount;
+    const isProdEnv = environmentAndAccount?.environment.is_production;
+    const { can } = usePermissions();
+    const canDeleteEnvironment = !isProdEnv || can(permissions.canDeleteProdEnvironment);
+
     const trigger = (
-        <SimpleTooltip tooltipContent={tooltipContent} className="text-text-light-gray pointer-events-none">
-            <Button variant="select" className="text-btn-destructive-fg bg-btn-destructive-bg flex gap-2 items-center text-sm" disabled={disabled}>
-                <IconTrash stroke={1} size={18} />
-                <span>Delete environment</span>
-            </Button>
-        </SimpleTooltip>
+        <ConditionalTooltip condition={typeof disabled === 'string'} content={disabled}>
+            <PermissionGate condition={canDeleteEnvironment}>
+                {(allowed) => (
+                    <Button variant="danger" disabled={!!disabled || !allowed}>
+                        <Trash2 strokeWidth={1} size={18} />
+                        <span>Delete environment</span>
+                    </Button>
+                )}
+            </PermissionGate>
+        </ConditionalTooltip>
     );
 
     return (

@@ -1,10 +1,9 @@
 import * as z from 'zod';
 
-import { accountService } from '@nangohq/shared';
+import { accountService, pubsub } from '@nangohq/shared';
 import { requireEmptyQuery, zodErrorToHTTP } from '@nangohq/utils';
 
 import { teamToApi } from '../../../formatters/team.js';
-import { pubsub } from '../../../pubsub.js';
 import { asyncWrapper } from '../../../utils/asyncWrapper.js';
 
 import type { PutTeam } from '@nangohq/types';
@@ -33,7 +32,7 @@ export const putTeam = asyncWrapper<PutTeam>(async (req, res) => {
     const { account } = res.locals;
     const body: PutTeam['Body'] = val.data;
 
-    await accountService.editAccount({ id: account.id, ...body });
+    await accountService.updateAccount({ id: account.id, ...body });
 
     void pubsub.publisher.publish({ subject: 'team', type: 'team.updated', payload: { id: account.id } });
 

@@ -1,18 +1,18 @@
 import getPort from 'get-port';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { Scheduler, getTestDbClient } from '@nangohq/scheduler';
+import { getTestDbClient, Scheduler } from '@nangohq/scheduler';
 import { nanoid } from '@nangohq/utils';
 
+import { TaskEventsHandler } from '../events.js';
 import { getServer } from '../server.js';
 import { OrchestratorClient } from './client.js';
-import { TaskEventsHandler } from '../events.js';
 
 import type { PostImmediate } from '../routes/v1/postImmediate.js';
 import type { Task } from '@nangohq/scheduler';
 import type { Result } from '@nangohq/utils';
 
-const dbClient = getTestDbClient();
+const dbClient = getTestDbClient('orchestrator_client');
 const eventsHandler = new TaskEventsHandler(dbClient.db);
 const scheduler = new Scheduler({
     db: dbClient.db,
@@ -33,6 +33,7 @@ describe('OrchestratorClient', async () => {
     afterAll(async () => {
         scheduler.stop();
         await dbClient.clearDatabase();
+        await dbClient.destroy();
     });
 
     describe('recurring schedule', () => {
@@ -163,6 +164,41 @@ describe('OrchestratorClient', async () => {
         });
     });
 
+    describe('immediate', () => {
+        it('should return a structured duplicate-name error when task name already exists', async () => {
+            const name = nanoid();
+            const groupKey = nanoid();
+            const request = {
+                name,
+                group: { key: groupKey, maxConcurrency: 0 },
+                retry: { count: 0, max: 0 },
+                timeoutSettingsInSecs: { createdToStarted: 30, startedToCompleted: 30, heartbeat: 60 },
+                args: {
+                    type: 'action' as const,
+                    actionName: nanoid(),
+                    connection: {
+                        id: 123,
+                        connection_id: 'C',
+                        provider_config_key: 'P',
+                        environment_id: 456
+                    },
+                    activityLogId: '789',
+                    input: { foo: 'bar' }
+                }
+            };
+
+            const first = await client.immediate(request);
+            expect(first.isOk()).toBe(true);
+
+            const duplicate = await client.immediate(request);
+            expect(duplicate.isErr()).toBe(true);
+            if (duplicate.isErr()) {
+                expect(duplicate.error.name).toBe('duplicate_task_name');
+                expect(duplicate.error.payload).toEqual({});
+            }
+        });
+    });
+
     describe('executeAction', () => {
         it('should be successful when action task succeed', async () => {
             const groupKey = nanoid();
@@ -262,6 +298,116 @@ describe('OrchestratorClient', async () => {
                 expect(res.isOk()).toBe(true);
             } finally {
                 processor.stop();
+            }
+        });
+    });
+    describe('executeWebhookBatch', () => {
+        it('should schedule a batch of webhooks in a single call', async () => {
+            const groupKey = nanoid();
+            const batchSize = 5;
+            const propsList = Array.from({ length: batchSize }, () => ({
+                name: nanoid(),
+                group: { key: groupKey, maxConcurrency: 0 },
+                args: {
+                    webhookName: 'W',
+                    parentSyncName: 'parent',
+                    connection: {
+                        id: 1,
+                        connection_id: 'C',
+                        provider_config_key: 'P',
+                        environment_id: 1
+                    },
+                    activityLogId: 'a',
+                    input: { foo: 'bar' }
+                }
+            }));
+
+            const res = await client.executeWebhookBatch(propsList);
+            expect(res.isOk()).toBe(true);
+            if (res.isOk()) {
+                expect(res.value).toHaveLength(batchSize);
+                for (let i = 0; i < batchSize; i++) {
+                    const entry = res.value[i]!;
+                    expect(entry.isOk()).toBe(true);
+                    if (entry.isOk()) {
+                        expect(entry.value.taskId).toMatch(/.+/);
+                        expect(entry.value.retryKey).toMatch(/.+/);
+                    }
+                }
+            }
+        });
+        it('should report duplicate-name failures per-entry without failing the whole batch', async () => {
+            const groupKey = nanoid();
+            const existingName = nanoid();
+
+            const firstRes = await client.executeWebhookBatch([
+                {
+                    name: existingName,
+                    group: { key: groupKey, maxConcurrency: 0 },
+                    args: {
+                        webhookName: 'W',
+                        parentSyncName: 'parent',
+                        connection: { id: 1, connection_id: 'C', provider_config_key: 'P', environment_id: 1 },
+                        activityLogId: 'a',
+                        input: {}
+                    }
+                }
+            ]);
+            expect(firstRes.isOk()).toBe(true);
+
+            const newName = nanoid();
+            const secondRes = await client.executeWebhookBatch([
+                {
+                    name: existingName,
+                    group: { key: groupKey, maxConcurrency: 0 },
+                    args: {
+                        webhookName: 'W',
+                        parentSyncName: 'parent',
+                        connection: { id: 1, connection_id: 'C', provider_config_key: 'P', environment_id: 1 },
+                        activityLogId: 'a',
+                        input: {}
+                    }
+                },
+                {
+                    name: newName,
+                    group: { key: groupKey, maxConcurrency: 0 },
+                    args: {
+                        webhookName: 'W',
+                        parentSyncName: 'parent',
+                        connection: { id: 1, connection_id: 'C', provider_config_key: 'P', environment_id: 1 },
+                        activityLogId: 'a',
+                        input: {}
+                    }
+                }
+            ]);
+            expect(secondRes.isOk()).toBe(true);
+            if (secondRes.isOk()) {
+                expect(secondRes.value[0]?.isErr()).toBe(true);
+                if (secondRes.value[0]?.isErr()) {
+                    expect(secondRes.value[0].error.name).toBe('duplicate_task_name');
+                }
+                expect(secondRes.value[1]?.isOk()).toBe(true);
+            }
+        });
+        it('should reject batches containing duplicate task names', async () => {
+            const sharedName = nanoid();
+            const groupKey = nanoid();
+            const props = {
+                name: sharedName,
+                group: { key: groupKey, maxConcurrency: 0 },
+                args: {
+                    webhookName: 'W',
+                    parentSyncName: 'parent',
+                    connection: { id: 1, connection_id: 'C', provider_config_key: 'P', environment_id: 1 },
+                    activityLogId: 'a',
+                    input: {}
+                }
+            };
+            const res = await client.executeWebhookBatch([props, props]);
+            expect(res.isErr()).toBe(true);
+            if (res.isErr()) {
+                expect(res.error.name).toBe('fetch_failed');
+                expect(JSON.stringify(res.error.payload)).toContain('duplicate task names within batch');
             }
         });
     });

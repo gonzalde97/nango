@@ -5,26 +5,37 @@ import path from 'node:path';
 import chalk from 'chalk';
 import { glob } from 'glob';
 import jscodeshift from 'jscodeshift';
-import ora from 'ora';
 
-import { Err, Ok } from '../utils/result.js';
-import { detectPackageManager, printDebug } from '../utils.js';
-import { NANGO_VERSION } from '../version.js';
-import { compileAll } from '../zeroYaml/compile.js';
 import { compileAllFiles } from '../services/compile.service.js';
 import { loadYamlAndGenerate } from '../services/model.service.js';
+import { detectPackageManager, printDebug } from '../utils.js';
+import { Err, Ok } from '../utils/result.js';
+import { Spinner } from '../utils/spinner.js';
+import { NANGO_VERSION } from '../version.js';
+import { compileAllFunctions } from '../zeroYaml/compile.js';
+import { exampleFolder } from '../zeroYaml/constants.js';
+import { syncTsConfig } from '../zeroYaml/utils.js';
 
 import type { NangoModel, NangoModelField, NangoYamlParsed, ParsedNangoAction, ParsedNangoSync, Result } from '@nangohq/types';
 import type { Collection, ImportSpecifier } from 'jscodeshift';
-import { exampleFolder } from '../zeroYaml/constants.js';
-import { syncTsConfig } from '../zeroYaml/utils.js';
 import type { PackageJson } from 'type-fest';
 
 const allowedTypesImports = ['ActionError', 'ProxyConfiguration'];
 const methodsWithGenericTypeArguments = ['batchSave', 'batchUpdate', 'batchDelete', 'getMetadata'];
 
-export async function migrateToZeroYaml({ fullPath, debug }: { fullPath: string; debug: boolean }): Promise<Result<void>> {
-    const spinner = ora({ text: 'Precompiling' }).start();
+export async function migrateToZeroYaml({
+    fullPath,
+    debug,
+    interactive = true,
+    dependencyUpdate = true
+}: {
+    fullPath: string;
+    debug: boolean;
+    interactive?: boolean;
+    dependencyUpdate?: boolean;
+}): Promise<Result<void>> {
+    const spinnerFactory = new Spinner({ interactive });
+    const spinner = spinnerFactory.start('Precompiling');
     const { success } = await compileAllFiles({ fullPath, debug });
     if (!success) {
         spinner.fail();
@@ -40,14 +51,14 @@ export async function migrateToZeroYaml({ fullPath, debug }: { fullPath: string;
     spinner.succeed();
 
     {
-        const spinner = ora({ text: 'Init folder' }).start();
+        const spinner = spinnerFactory.start('Init folder');
         await addPackageJson({ fullPath, debug });
         await syncTsConfig({ fullPath });
         spinner.succeed();
     }
 
     {
-        const spinner = ora({ text: 'Generating models.ts' }).start();
+        const spinner = spinnerFactory.start('Generating models.ts');
         const content = generateModelsTs({ parsed });
         // Write to models.ts
         const modelsPath = path.join(fullPath, 'models.ts');
@@ -61,7 +72,7 @@ export async function migrateToZeroYaml({ fullPath, debug }: { fullPath: string;
             const fp = path.join(integration.providerConfigKey, 'syncs', `${sync.name}.ts`);
             const targetFile = path.join(fullPath, fp);
 
-            const spinner = ora({ text: `Migrating: ${fp}` }).start();
+            const spinner = spinnerFactory.start(`Migrating: ${fp}`);
             try {
                 if (await hasSymlinkInPath(targetFile, fullPath)) {
                     spinner.warn('Skipping symlink');
@@ -83,7 +94,7 @@ export async function migrateToZeroYaml({ fullPath, debug }: { fullPath: string;
             const fp = path.join(integration.providerConfigKey, 'actions', `${action.name}.ts`);
             const targetFile = path.join(fullPath, fp);
 
-            const spinner = ora({ text: `Migrating: ${fp}` }).start();
+            const spinner = spinnerFactory.start(`Migrating: ${fp}`);
             try {
                 if (await hasSymlinkInPath(targetFile, fullPath)) {
                     spinner.warn('Skipping symlink');
@@ -106,7 +117,7 @@ export async function migrateToZeroYaml({ fullPath, debug }: { fullPath: string;
                 const fp = path.join(integration.providerConfigKey, 'on-events', `${eventName}.ts`);
                 const targetFile = path.join(fullPath, fp);
 
-                const spinner = ora({ text: `Migrating: ${fp}` }).start();
+                const spinner = spinnerFactory.start(`Migrating: ${fp}`);
                 try {
                     if (await hasSymlinkInPath(targetFile, fullPath)) {
                         spinner.warn('Skipping symlink');
@@ -129,29 +140,32 @@ export async function migrateToZeroYaml({ fullPath, debug }: { fullPath: string;
     // After migration, process all remaining .ts files in fullPath
     {
         console.log('Processing helper files');
-        await processHelperFiles({ fullPath, parsed });
+        await processHelperFiles({ fullPath, parsed, spinnerFactory });
     }
 
-    {
-        const spinner = ora({ text: 'Installing dependencies' }).start();
+    if (dependencyUpdate) {
+        const spinner = spinnerFactory.start('Installing dependencies');
         await runPackageManagerInstall(fullPath);
         spinner.succeed();
+    } else {
+        const spinner = spinnerFactory.start('Installing dependencies');
+        spinner.warn('Skipping dependency install (--no-dependency-update)');
     }
 
     {
-        const spinner = ora({ text: 'Generating index.ts' }).start();
+        const spinner = spinnerFactory.start('Generating index.ts');
         await generateIndexTs({ fullPath, parsed });
         spinner.succeed();
     }
 
     {
-        const spinner = ora({ text: 'Deleting nango.yaml' }).start();
+        const spinner = spinnerFactory.start('Deleting nango.yaml');
         await fs.promises.rm(path.join(fullPath, 'nango.yaml'));
         spinner.succeed();
     }
 
     {
-        await compileAll({ fullPath, debug });
+        await compileAllFunctions({ fullPath, debug, interactive });
     }
 
     return Ok(undefined);
@@ -1046,7 +1060,7 @@ function createNangoLocalType({ j, name, variable }: { j: jscodeshift.JSCodeshif
 }
 
 // Helper: For each file in the list, update model imports for NangoSync/NangoAction
-async function processHelperFiles({ fullPath, parsed }: { fullPath: string; parsed: NangoYamlParsed }) {
+async function processHelperFiles({ fullPath, parsed, spinnerFactory }: { fullPath: string; parsed: NangoYamlParsed; spinnerFactory: Spinner }) {
     const files = await glob('**/*.ts', {
         cwd: fullPath,
         ignore: ['**/.nango/**', '**/node_modules/**', '**/dist/**', '**/build/**'],
@@ -1069,7 +1083,7 @@ async function processHelperFiles({ fullPath, parsed }: { fullPath: string; pars
         }
     }
 
-    const ignored = ['/models.ts', '/.nango/schema.ts'];
+    const ignored = ['/models.ts'];
 
     // Filter out integration files from the glob list since they were already processed
     for (const absPath of files) {
@@ -1082,7 +1096,7 @@ async function processHelperFiles({ fullPath, parsed }: { fullPath: string; pars
             continue;
         }
 
-        const spinner = ora({ text: `Migrating ${relPath}` }).start();
+        const spinner = spinnerFactory.start(`Migrating ${relPath}`);
         if (await hasSymlinkInPath(absPath, fullPath)) {
             spinner.warn('Skipping symlink');
             continue;

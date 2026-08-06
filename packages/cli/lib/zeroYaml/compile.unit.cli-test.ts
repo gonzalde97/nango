@@ -5,9 +5,10 @@ import { promisify } from 'node:util';
 
 import { assert, describe, expect, it } from 'vitest';
 
-import { bundleFile, compileAll } from './compile.js';
-import { CompileError } from './utils.js';
 import { copyDirectoryAndContents, fixturesPath, getTestDirectory } from '../tests/helpers.js';
+import { bundleFile, compileAllFunctions, detectFeatures } from './compile.js';
+import { validateFunction } from './definitions.js';
+import { CompileError } from './utils.js';
 
 const exec = promisify(execCb);
 
@@ -31,13 +32,41 @@ describe('compileAll', () => {
         console.log('compiling to ', dir);
         await copyDirectoryAndContents(path.join(fixturesPath, 'zero/valid'), dir);
 
-        const pkg = { name: 'test', type: 'module', dependencies: { nango: `file:${path.resolve(path.join(fixturesPath, '..'))}`, zod: '4.0.5' } };
+        const pkg = { name: 'test', type: 'module', dependencies: { nango: `file:${path.resolve(path.join(fixturesPath, '..'))}`, zod: '4.3.6' } };
 
         await fs.promises.writeFile(path.join(dir, 'package.json'), JSON.stringify(pkg, null, 2));
         await exec('npm i', { cwd: dir });
-        const result = await compileAll({ fullPath: dir, debug: false });
+        const result = await compileAllFunctions({ fullPath: dir, debug: false });
         result.unwrap();
         expect(result.isOk()).toBe(true);
+
+        const nangoJson = JSON.parse(await fs.promises.readFile(path.join(dir, '.nango', 'nango.json'), 'utf8'));
+        const github = nangoJson.find((integration: any) => integration.providerConfigKey === 'github');
+        expect(github).toMatchObject({
+            providerConfigKey: 'github',
+            syncs: [{ name: 'fetchIssues' }],
+            actions: [{ name: 'createIssue' }]
+        });
+        expect(github).not.toHaveProperty('functions');
+
+        const functionsJson = JSON.parse(await fs.promises.readFile(path.join(dir, '.nango', 'functions.json'), 'utf8'));
+        expect(functionsJson).toHaveLength(1);
+        expect(functionsJson[0]).toMatchObject({
+            name: 'fetchIssues',
+            integrationId: 'github',
+            description: 'Fetch a GitHub issue on demand',
+            trigger: { kind: 'none' },
+            requires: { connection: true, outbound: true, invoke: false },
+            capabilities: { usesRecords: false, usesOutbound: true, usesCheckpoints: false, usesMetadata: false, usesInvoke: false },
+            limits: { concurrency: { perConnection: 'max' } },
+            input_schema_ref: '#/definitions/FunctionInput_github_fetchIssues',
+            output_schema_ref: '#/definitions/FunctionOutput_github_fetchIssues',
+            model_schema_refs: [],
+            metadata_schema_ref: null,
+            checkpoint_schema_ref: null
+        });
+        expect(functionsJson[0].json_schema.definitions).toHaveProperty('FunctionInput_github_fetchIssues');
+        expect(functionsJson[0].json_schema.definitions).toHaveProperty('FunctionOutput_github_fetchIssues');
     });
 });
 
@@ -65,5 +94,79 @@ describe('edge cases', () => {
         assert(result.error instanceof CompileError, 'Should be an error');
 
         expect(result.error.toText().replaceAll('\\', '/')).toMatchSnapshot();
+    });
+});
+
+describe('experimental functions', () => {
+    it('should bundle a createFunction imported from nango/experimental', async () => {
+        const result = await bundleFile({
+            entryPoint: path.join(fixturesPath, 'zero/cases/createFunction.valid.js'),
+            projectRootPath: fixturesPath
+        });
+        if (result.isErr()) {
+            throw result.error;
+        }
+        expect(result.isOk()).toBe(true);
+        // the nango/experimental import must not trip the disallowed-import guard
+        expect(result.value).not.toContain('disallowed_import');
+    });
+});
+
+describe('validateFunction', () => {
+    const base = { integrationId: 'github', basename: 'fetchIssues' };
+
+    it('accepts an invoke-only function with no trigger', () => {
+        const res = validateFunction({ ...base, params: {} });
+        expect(res.isOk()).toBe(true);
+    });
+
+    it("accepts an explicit 'none' trigger", () => {
+        const res = validateFunction({ ...base, params: { trigger: { kind: 'none' } } });
+        expect(res.isOk()).toBe(true);
+    });
+
+    it('rejects an http trigger (not supported yet)', () => {
+        const res = validateFunction({ ...base, params: { trigger: { kind: 'http' } } });
+        assert(res.isErr());
+        expect(res.error.message).toContain("unsupported trigger kind 'http'");
+    });
+
+    it('rejects a schedule trigger', () => {
+        const res = validateFunction({ ...base, params: { trigger: { kind: 'schedule', frequency: 'every hour' } } });
+        assert(res.isErr());
+        expect(res.error.message).toContain("unsupported trigger kind 'schedule'");
+    });
+
+    it('rejects declaring data', () => {
+        const res = validateFunction({ ...base, params: { data: { models: {} } } });
+        assert(res.isErr());
+        expect(res.error.message).toContain("declares 'data'");
+    });
+
+    it('rejects requires.invoke', () => {
+        const res = validateFunction({ ...base, params: { requires: { invoke: true } } });
+        assert(res.isErr());
+        expect(res.error.message).toContain('requires.invoke');
+    });
+
+    it('rejects connection-less functions', () => {
+        const res = validateFunction({ ...base, params: { requires: { connection: false } } });
+        assert(res.isErr());
+        expect(res.error.message).toContain('connection-less');
+    });
+});
+
+describe('detectFeatures', () => {
+    it('should fail if entrypoint does not exists', () => {
+        const res = detectFeatures({ entryPoint: path.join(fixturesPath, 'does/not/exist.ts') });
+        expect(res.isErr()).toBe(true);
+    });
+    it('should detect features', () => {
+        const features = detectFeatures({ entryPoint: path.join(fixturesPath, 'zero/cases/features.ts') }).unwrap();
+        expect(features).toEqual(['checkpoints']);
+    });
+    it('should not detect features if none', () => {
+        const features = detectFeatures({ entryPoint: path.join(fixturesPath, 'zero/cases/features.none.ts') }).unwrap();
+        expect(features).toEqual([]);
     });
 });

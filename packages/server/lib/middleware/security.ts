@@ -1,8 +1,11 @@
 import helmet from 'helmet';
 
-import { basePublicUrl, baseUrl, connectUrl } from '@nangohq/utils';
+import { basePublicUrl, baseUrl, connectUrl, connectUrlAsDocumentBase } from '@nangohq/utils';
 
 import type { RequestHandler } from 'express';
+
+// CSP path matching: no trailing slash = exact match (URL older SDKs load), with = prefix match (assets/routes).
+const connectUrlCspSources = [...new Set([connectUrl, connectUrlAsDocumentBase().toString()])];
 
 export function securityMiddlewares(): RequestHandler[] {
     const hostPublic = basePublicUrl;
@@ -24,7 +27,7 @@ export function securityMiddlewares(): RequestHandler[] {
         helmet.contentSecurityPolicy({
             reportOnly: reportOnly !== 'false',
             directives: {
-                defaultSrc: ["'self'", hostPublic, hostApi, connectUrl],
+                defaultSrc: ["'self'", hostPublic, hostApi, ...connectUrlCspSources],
                 childSrc: "'self'",
                 connectSrc: [
                     "'self'",
@@ -33,23 +36,35 @@ export function securityMiddlewares(): RequestHandler[] {
                     hostPublic,
                     hostApi,
                     hostWs.href,
-                    connectUrl,
+                    ...connectUrlCspSources,
                     'https://*.posthog.com',
                     'https://*.stripe.com',
-                    'https://api.apidownwatch.com'
+                    'https://*.plain.com',
+                    'wss://*.plain.com',
+                    'https://raw.githubusercontent.com'
                 ],
-                fontSrc: ["'self'", 'https://*.googleapis.com', 'https://*.gstatic.com'],
-                frameSrc: ["'self'", 'https://accounts.google.com', hostPublic, hostApi, connectUrl, 'https://www.youtube.com', 'https://*.stripe.com'],
+                fontSrc: ["'self'", 'data:', 'https://*.googleapis.com', 'https://*.gstatic.com', 'https://*.cdn-plain.com'],
+                frameSrc: [
+                    "'self'",
+                    'https://accounts.google.com',
+                    hostPublic,
+                    hostApi,
+                    ...connectUrlCspSources,
+                    'https://www.youtube.com',
+                    'https://*.stripe.com'
+                ],
                 imgSrc: [
                     "'self'",
                     'data:',
+                    'blob:',
                     hostPublic,
                     hostApi,
                     'https://*.google-analytics.com',
                     'https://*.googleapis.com',
                     'https://*.posthog.com',
                     'https://img.logo.dev',
-                    'https://*.ytimg.com'
+                    'https://*.ytimg.com',
+                    'https://*.plain.com'
                 ],
                 manifestSrc: "'self'",
                 mediaSrc: "'self'",
@@ -66,7 +81,7 @@ export function securityMiddlewares(): RequestHandler[] {
                     'https://apis.google.com',
                     'https://*.posthog.com',
                     'https://www.youtube.com',
-                    'https://api.apidownwatch.com'
+                    'https://*.cdn-plain.com'
                 ],
                 styleSrc: ['blob:', "'self'", "'unsafe-inline'", 'https://*.googleapis.com', hostPublic, hostApi],
                 workerSrc: ['blob:', "'self'", hostPublic, hostApi, 'https://*.googleapis.com', 'https://*.posthog.com']

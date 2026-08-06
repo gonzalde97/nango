@@ -1,3 +1,6 @@
+import cloneDeepWith from 'lodash-es/cloneDeepWith.js';
+import isDate from 'lodash-es/isDate.js';
+
 import { endUserToApi } from './endUser.js';
 
 import type {
@@ -15,25 +18,30 @@ export function connectionSimpleToApi({
     data,
     provider,
     activeLog,
-    endUser
+    endUser,
+    pausedSyncs
 }: {
     data: Omit<DBConnection | DBConnectionAsJSONRow, 'credentials'>;
     provider: string;
     activeLog: [{ type: string; log_id: string }];
     endUser: DBEndUser | null;
+    pausedSyncs: string[];
 }): ApiConnectionSimple {
     return {
         id: data.id,
+        config_id: data.config_id,
         connection_id: data.connection_id,
         provider_config_key: data.provider_config_key,
         provider,
         errors: activeLog,
         endUser: endUser ? endUserToApi(endUser) : null,
+        tags: data.tags,
+        pausedSyncs,
         created_at: String(data.created_at),
         updated_at: String(data.updated_at)
     };
 }
-export function connectionFullToApi(connection: DBConnectionDecrypted): ApiConnectionFull {
+export function connectionFullToApi(connection: DBConnectionDecrypted, options?: { includeCredentials?: boolean }): ApiConnectionFull {
     return {
         id: connection.id,
         config_id: connection.config_id,
@@ -41,8 +49,10 @@ export function connectionFullToApi(connection: DBConnectionDecrypted): ApiConne
         connection_id: connection.connection_id,
         provider_config_key: connection.provider_config_key,
         connection_config: connection.connection_config,
-        credentials: connection.credentials,
+        webhook_url_override: connection.webhook_url_override,
+        credentials: options?.includeCredentials ? connection.credentials : redactCredentials(connection.credentials),
         metadata: connection.metadata,
+        tags: connection.tags,
         last_fetched_at: connection.last_fetched_at ? String(connection.last_fetched_at) : null,
         credentials_expires_at: connection.credentials_expires_at ? String(connection.credentials_expires_at) : null,
         last_refresh_failure: connection.last_refresh_failure ? String(connection.last_refresh_failure) : null,
@@ -72,6 +82,7 @@ export function connectionSimpleToPublicApi({
         provider,
         errors: activeLog,
         end_user: endUser ? endUserToApi(endUser) : null,
+        tags: data.tags,
         metadata: data.metadata || null,
         created: data.created_at instanceof Date ? data.created_at.toISOString() : String(data.created_at)
     };
@@ -81,12 +92,14 @@ export function connectionFullToPublicApi({
     data,
     provider,
     activeLog,
-    endUser
+    endUser,
+    includeCredentials
 }: {
     data: (DBConnectionDecrypted | DBConnectionAsJSONRow) & { credentials: DBConnectionDecrypted['credentials'] };
     provider: string;
     activeLog: { type: string; log_id: string }[];
     endUser: DBEndUser | null;
+    includeCredentials: boolean;
 }): ApiPublicConnectionFull {
     return {
         id: data.id,
@@ -95,8 +108,10 @@ export function connectionFullToPublicApi({
         provider,
         errors: activeLog,
         end_user: endUser ? endUserToApi(endUser) : null,
+        tags: data.tags,
         metadata: data.metadata || null,
         connection_config: data.connection_config || {},
+        webhook_url_override: data.webhook_url_override ?? null,
         created_at: data.created_at instanceof Date ? data.created_at.toISOString() : String(data.created_at),
         updated_at: data.updated_at instanceof Date ? data.updated_at.toISOString() : String(data.updated_at),
         last_fetched_at: data.last_fetched_at
@@ -104,6 +119,40 @@ export function connectionFullToPublicApi({
                 ? data.last_fetched_at.toISOString()
                 : String(data.last_fetched_at)
             : null,
-        credentials: data.credentials
+        credentials: includeCredentials
+            ? cloneDeepWith(data.credentials, (value) => {
+                  if (isDate(value)) {
+                      return value.toISOString();
+                  }
+                  return undefined;
+              })
+            : ({} as ApiPublicConnectionFull['credentials'])
     };
+}
+
+const NON_SENSITIVE_KEYS = new Set(['type', 'expires_at']);
+
+function redactValue(value: unknown): unknown {
+    if (value === null || value === undefined) {
+        return value;
+    }
+    if (Array.isArray(value)) {
+        return value.map(redactValue);
+    }
+    if (typeof value === 'object') {
+        return redactObject(value as Record<string, unknown>);
+    }
+    return 'REDACTED';
+}
+
+function redactObject(obj: Record<string, unknown>): Record<string, unknown> {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj)) {
+        result[key] = NON_SENSITIVE_KEYS.has(key) ? value : redactValue(value);
+    }
+    return result;
+}
+
+export function redactCredentials(credentials: DBConnectionDecrypted['credentials']): DBConnectionDecrypted['credentials'] {
+    return redactObject(credentials as Record<string, unknown>) as DBConnectionDecrypted['credentials'];
 }

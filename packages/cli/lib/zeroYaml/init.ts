@@ -4,11 +4,11 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 
 import chalk from 'chalk';
-import ora from 'ora';
 
 import { detectPackageManager, printDebug } from '../utils.js';
+import { Spinner } from '../utils/spinner.js';
 import { NANGO_VERSION } from '../version.js';
-import { compileAll } from './compile.js';
+import { compileAllFunctions } from './compile.js';
 import { exampleFolder } from './constants.js';
 
 import type { PackageJson } from 'type-fest';
@@ -21,13 +21,18 @@ const execAsync = promisify(exec);
 export async function initZero({
     absolutePath,
     debug = false,
-    onlyCopy = false
+    onlyCopy = false,
+    interactive = true,
+    dependencyUpdate = true
 }: {
     absolutePath: string;
     debug?: boolean;
     onlyCopy?: boolean;
+    interactive?: boolean;
+    dependencyUpdate?: boolean;
 }): Promise<boolean> {
     printDebug(`Creating the nango integrations directory in ${absolutePath}`, debug);
+    const spinnerFactory = new Spinner({ interactive });
 
     const stat = fs.statSync(absolutePath, { throwIfNoEntry: false });
 
@@ -43,7 +48,7 @@ export async function initZero({
 
     // Copy example folder
     {
-        const spinner = ora({ text: 'Copy example' }).start();
+        const spinner = spinnerFactory.start('Copy example');
         try {
             printDebug(`Copy example folder`, debug);
 
@@ -80,12 +85,20 @@ export async function initZero({
     }
 
     // Install dependencies
-    {
-        const spinner = ora({ text: 'Install dependencies' }).start();
+    if (dependencyUpdate) {
+        const spinner = spinnerFactory.start('Install dependencies');
         try {
             printDebug(`Running package manager install`, debug);
 
             const packageManager = detectPackageManager({ fullPath: absolutePath });
+
+            // Yarn: seed a standalone project so it's not treated as part of the
+            // parent workspace, and use node-modules linker so tsc can resolve packages.
+            if (packageManager === 'yarn' && !fs.existsSync(path.join(absolutePath, 'yarn.lock'))) {
+                await fs.promises.writeFile(path.join(absolutePath, 'yarn.lock'), '');
+                await fs.promises.writeFile(path.join(absolutePath, '.yarnrc.yml'), 'nodeLinker: node-modules\n');
+            }
+
             await execAsync(`${packageManager} install`, { cwd: absolutePath });
             spinner.succeed();
         } catch (err) {
@@ -93,10 +106,13 @@ export async function initZero({
             console.log(chalk.red(`Failed to install dependencies: ${err instanceof Error ? err.message : 'unknown error'}`));
             return false;
         }
+    } else {
+        const spinner = spinnerFactory.start('Install dependencies');
+        spinner.warn('Skipping dependency install (--no-dependency-update)');
     }
 
     {
-        const res = await compileAll({ fullPath: absolutePath, debug });
+        const res = await compileAllFunctions({ fullPath: absolutePath, debug, interactive });
         if (res.isErr()) {
             return false;
         }

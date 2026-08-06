@@ -1,65 +1,87 @@
 ---
-title: 'Intro to Nango'
-sidebarTitle: 'Intro to Nango'
-description: 'Understand Nango in 5 minutes.'
+title: 'Introduction'
+sidebarTitle: 'Introduction'
+description: 'Build product integrations with AI, using code you control and infrastructure built for scale.'
 ---
 
-Nango is the platform to **authorize and access APIs** on behalf of your customers.
+## What is Nango?
 
-## Who is Nango for?
+Nango is the integration layer for AI-built, code-owned product integrations.
 
-Nango is designed for developers building **product integrations**: Letting users connect their external accounts to your own product.
+Your users connect external APIs through Nango. You generate and customize TypeScript functions with your favorite coding agent. Your app, backend jobs, or agents then consume those functions through Nango's API, SDKs, or MCP server.
 
-## Core features
+Nango supports [900+ APIs](/integrations/overview) and handles auth, credentials, execution, retries, rate limits, observability, environments, and tenant isolation so you can ship integrations without rebuilding the same infrastructure for every provider.
 
-- **[API Auth](/guides/use-cases/api-auth)** for [500+ APIs](/integrations/overview)
-    - **Embedded, white-label auth UI**: With appropriate input forms and guidance.
-    - **Secure credential management**: Retrieval, storage, and refreshing of API credentials.
-    - **Credential monitoring**: Notifies via webhooks when credentials become invalid.
-- **[Request proxying](/guides/use-cases/proxy)**: Injects credentials into API requests seamlessly.
-- **[Data Syncing](/guides/use-cases/syncs)**: Continuously synchronize data from APIs to your application.
-- **[Actions](/guides/use-cases/actions)**: Encapsulate use cases into reusable actions.
-- **[Webhooks](/guides/use-cases/webhooks)**: Listen to webhooks from APIs with a universal interface.
-- **[AI tool calling & MCP server](/guides/use-cases/ai-tool-calling)**: Expose your integrations as tools to any LLM or AI agent.
-- **[Observability](/guides/platform/logs)**: Tailored monitoring for integrations.
-- **Management dashboard & APIs**: Control and oversee all connected accounts.
+## Why it matters
 
-## Benefits
+Integration work used to mean choosing between slow custom builds and rigid pre-built connectors.
 
-- **Speed**: Eliminates the need to build authorization flows and infrastructure for each API.
-- **Reliability**: Provides a robust solution from day one.
-- **Security**: Ensures secure storage and retrieval of API credentials & user data.
-- **Observability**: Provides full visibility into every interaction with the external API.
-- **Modularity**: Pick the features you want to use, without vendor lock-in.
+With Nango, you can describe the integration you need, generate working code in seconds, extend coverage as customers ask for new APIs, and customize behavior per customer while keeping the implementation in code you can review, test, and version control.
 
-By leveraging Nango, developers can save days per integration and months over time.
+## How it works
 
-## Our approach to integrations
+<Steps>
+  <Step id="users-connect-apis" title="Users connect APIs">
+    Embed Nango Auth in your product so users can connect accounts from external APIs. Nango handles OAuth, API keys, token refresh, scopes, permissions, and credential storage.
+  </Step>
 
-We believe engineering teams should build their own integrations.
+  <Step id="generate-functions" title="You generate functions">
+    Build the integration logic as Nango Functions: TypeScript functions that call provider APIs, transform data, sync records, process webhooks, or perform actions. Generate them with AI, then edit them like normal application code.
+  </Step>
 
-### The case for building integrations
+  <Step id="use-functions" title="Your app or agents use them">
+    Call functions from your backend, trigger them on schedules or webhooks, or expose selected action functions as tools for AI agents through schemas and MCP.
+  </Step>
+</Steps>
 
-Every product has unique data structures and user workflows. When you build an integration, you map your product and the external product together. This requires a deep understanding of _both_ products.
+Nango's two core primitives are **Auth** for connecting user accounts and **Functions** for running integration logic on production infrastructure.
 
-When you buy pre-built integrations you are forced into someone else's assumptions about how your data should connect. This often doesn't match your users' expectations or your product's logic.
+## What you can build
 
-### The control and reliability advantage
+Explore the main product integration use cases:
 
-When you build integrations in-house, you maintain full control over API requests, data transformations, and debugging capabilities.
+<CardGroup cols={3}>
+  <Card title="Tool calling for AI agents" icon="robot" href="/getting-started/use-cases/tool-calling">
+    Give agents scoped, observable access to external APIs through Nango action functions.
+  </Card>
+  <Card title="Sync external API data" icon="arrows-rotate" href="/getting-started/use-cases/syncs">
+    Keep external API data fresh for your product, RAG pipeline, or change-detection workflow.
+  </Card>
+  <Card title="Run external API operations" icon="play" href="/getting-started/use-cases/actions">
+    Use Nango functions to read, write, and automate external APIs on demand.
+  </Card>
+  <Card title="Process external webhooks" icon="bell" href="/getting-started/use-cases/webhooks-from-external-apis">
+    Receive provider webhooks through Nango, then forward or process them with functions.
+  </Card>
+  <Card title="Build a unified API" icon="layer-group" href="/getting-started/use-cases/unified-apis">
+    Normalize several external APIs behind your own stable product interface.
+  </Card>
+  <Card title="Customize per customer" icon="sliders" href="/getting-started/use-cases/customer-configuration">
+    Adapt integration behavior for each customer without forking code.
+  </Card>
+</CardGroup>
 
-With pre-built solutions, you're dependent on external support teams to fix issues and prioritize your requests, which can lead to delays and frustration when problems arise in production.
+## What Nango handles
 
-### A better way to build
-
-Our goal with Nango is to provide a better way to build integrations:
-- Nango provides the infrastructure to build reliable, scalable integrations fast: API auth, syncing framework, webhook handling, observability, etc.
-- You focus on what makes your integration great for your customers: Seamless product mappings, excellent UX, and deep integration with your existing product.
-
-More than 400 teams already use Nango in production. If you have feedback, we would love to hear it on our [Slack community](https://nango.dev/slack).
+<CardGroup cols={2}>
+  <Card title="Auth and permissions" icon="lock" href="/guides/auth/auth-guide">
+    OAuth flows, API keys, token refresh, scopes, provider quirks, and per-user access to external APIs.
+  </Card>
+  <Card title="Integration runtime" icon="server" href="/guides/functions/functions-guide">
+    Actions, syncs, webhooks, schedules, retries, rate-limit backoff, checkpoints, and resumable execution.
+  </Card>
+  <Card title="Agent-ready access" icon="robot" href="/guides/functions/tool-calling">
+    Tool schemas, MCP support, and scoped action functions your agents can call without handling provider credentials.
+  </Card>
+  <Card title="Production controls" icon="chart-line" href="/guides/platform/observability">
+    Logs, metrics, alerts, isolated environments, CI/CD workflows, tenant isolation, open-source deployment, and compliance controls.
+  </Card>
+</CardGroup>
 
 ## Get started
 
-Access any API in minutes, and fully embed the flow within your app in an hour.
-
-Follow the [quickstart](/getting-started/quickstart).
+<CardGroup cols={1}>
+  <Card title="Quickstart" icon="bolt" href="/getting-started/quickstart">
+    Connect your first API and make a request in minutes.
+  </Card>
+</CardGroup>

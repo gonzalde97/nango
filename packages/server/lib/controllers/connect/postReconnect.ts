@@ -3,13 +3,14 @@ import * as z from 'zod';
 import db from '@nangohq/database';
 import * as keystore from '@nangohq/keystore';
 import { endUserToMeta, logContextGetter } from '@nangohq/logs';
-import { EndUserMapper, configService, connectionService, getEndUser } from '@nangohq/shared';
-import { connectUrl, flagHasPlan, requireEmptyQuery, zodErrorToHTTP } from '@nangohq/utils';
+import { buildTagsFromEndUser, configService, connectionService, EndUserMapper, getEndUser } from '@nangohq/shared';
+import { buildConnectUiSessionLink, flagHasPlan, requireEmptyQuery, zodErrorToHTTP } from '@nangohq/utils';
 
-import { bodySchema as originalBodySchema, checkIntegrationsExist } from './postSessions.js';
 import { connectionIdSchema, providerConfigKeySchema } from '../../helpers/validation.js';
 import * as connectSessionService from '../../services/connectSession.service.js';
 import { asyncWrapper } from '../../utils/asyncWrapper.js';
+import { mapDeprecatedConnectionConfigWebhookUrl } from './mapDeprecatedConnectionConfigWebhookUrl.js';
+import { checkIntegrationsExist, bodySchema as originalBodySchema } from './postSessions.js';
 
 import type { PostPublicConnectSessionsReconnect } from '@nangohq/types';
 
@@ -20,7 +21,9 @@ const bodySchema = z
         end_user: originalBodySchema.shape.end_user.optional(),
         organization: originalBodySchema.shape.organization,
         integrations_config_defaults: originalBodySchema.shape.integrations_config_defaults,
-        overrides: originalBodySchema.shape.overrides.optional()
+        overrides: originalBodySchema.shape.overrides.optional(),
+        webhook_url_override: originalBodySchema.shape.webhook_url_override,
+        tags: originalBodySchema.shape.tags
     })
     .strict();
 
@@ -43,7 +46,12 @@ export const postConnectSessionsReconnect = asyncWrapper<PostPublicConnectSessio
     }
 
     const { account, environment, plan } = res.locals;
-    const body: PostPublicConnectSessionsReconnect['Body'] = val.data;
+    const mapped = mapDeprecatedConnectionConfigWebhookUrl(val.data);
+    if (!mapped.ok) {
+        res.status(400).send({ error: { code: 'invalid_body', errors: zodErrorToHTTP({ issues: mapped.issues }) } });
+        return;
+    }
+    const body: PostPublicConnectSessionsReconnect['Body'] = mapped.body;
 
     const { status, response }: Reply = await db.knex.transaction<Reply>(async (trx) => {
         const connection = await connectionService.checkIfConnectionExists(trx, {
@@ -58,19 +66,16 @@ export const postConnectSessionsReconnect = asyncWrapper<PostPublicConnectSessio
             };
         }
 
-        if (!connection.end_user_id) {
-            return {
-                status: 400,
-                response: { error: { code: 'invalid_body', message: "Can't update a connection that was not created with a session token" } }
-            };
+        let endUser = null;
+        if (connection.end_user_id) {
+            const endUserRes = await getEndUser(trx, { id: connection.end_user_id, accountId: account.id, environmentId: environment.id }, { forUpdate: true });
+            if (endUserRes.isErr()) {
+                return { status: 500, response: { error: { code: 'server_error', message: endUserRes.error.message } } };
+            }
+            endUser = endUserRes.value;
         }
-
-        const endUserRes = await getEndUser(trx, { id: connection.end_user_id, accountId: account.id, environmentId: environment.id }, { forUpdate: true });
-        if (endUserRes.isErr()) {
-            return { status: 500, response: { error: { code: 'server_error', message: endUserRes.error.message } } };
-        }
-
-        const endUser = endUserRes.value;
+        const endUserTags = buildTagsFromEndUser(body.end_user, body.organization);
+        const tags = { ...endUserTags, ...body.tags };
 
         if (body.integrations_config_defaults || body.overrides) {
             const integrations = await configService.listProviderConfigs(trx, environment.id);
@@ -107,7 +112,7 @@ export const postConnectSessionsReconnect = asyncWrapper<PostPublicConnectSessio
 
         // create connect session
         const createConnectSession = await connectSessionService.createConnectSession(trx, {
-            endUserId: endUser.id,
+            endUserId: endUser?.id ?? null,
             endUser: body.end_user ? EndUserMapper.apiToEndUser(body.end_user, body.organization) : null,
             accountId: account.id,
             environmentId: environment.id,
@@ -117,12 +122,18 @@ export const postConnectSessionsReconnect = asyncWrapper<PostPublicConnectSessio
                 ? Object.fromEntries(
                       Object.entries(body.integrations_config_defaults).map(([key, value]) => [
                           key,
-                          { user_scopes: value.user_scopes, connectionConfig: value.connection_config }
+                          {
+                              user_scopes: value.user_scopes,
+                              authorization_params: value.authorization_params,
+                              connectionConfig: value.connection_config
+                          }
                       ])
                   )
                 : null,
             operationId: logCtx.id,
-            overrides: body.overrides || null
+            overrides: body.overrides || null,
+            webhookUrlOverride: body.webhook_url_override || null,
+            tags
         });
         if (createConnectSession.isErr()) {
             return { status: 500, response: { error: { code: 'server_error', message: 'Failed to create connect session' } } };
@@ -142,7 +153,7 @@ export const postConnectSessionsReconnect = asyncWrapper<PostPublicConnectSessio
         }
 
         const [token, privateKey] = createPrivateKey.value;
-        const connect_link = new URL(`${connectUrl}?session_token=${token}`).toString();
+        const connect_link = buildConnectUiSessionLink(token);
         return { status: 201, response: { data: { token, connect_link, expires_at: privateKey.expiresAt!.toISOString() } } };
     });
 

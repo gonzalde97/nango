@@ -1,46 +1,96 @@
-import { IconBook, IconChevronRight, IconHelpCircle } from '@tabler/icons-react';
-import { useEffect, useRef, useState } from 'react';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { Book, ExternalLink } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
 import { Helmet } from 'react-helmet';
-import { Link } from 'react-router-dom';
-import { useSearchParam, useUnmount } from 'react-use';
+import { useForm } from 'react-hook-form';
+import { useSearchParam } from 'react-use';
+import { z } from 'zod';
 
-import { Info } from '../../components/Info';
-import { SimpleTooltip } from '../../components/SimpleTooltip';
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../../components/ui/Collapsible';
-import { Skeleton } from '../../components/ui/Skeleton';
-import { Button, ButtonLink } from '../../components/ui/button/Button';
-import { Input } from '../../components/ui/input/Input';
-import { useListIntegration } from '../../hooks/useIntegration';
+import { ButtonLink } from '@/components/ui/ButtonLink';
+import { Skeleton } from '@/components/ui/Skeleton';
+import { useProvider } from '@/hooks/useProvider';
+import { Form } from '../../components/ui/Form';
+import { useListIntegrations } from '../../hooks/useIntegration';
 import { useUser } from '../../hooks/useUser';
 import DashboardLayout from '../../layout/DashboardLayout';
 import { useStore } from '../../store';
+import { track } from '../../utils/analytics';
+import { ConnectionAdvancedConfig } from './components/ConnectionAdvancedConfig';
 import { CreateConnectionSelector } from './components/CreateConnectionSelector';
 
-import type { ConnectUI } from '@nangohq/frontend';
 import type { ApiIntegrationList } from '@nangohq/types';
+
+const schema = z.object({
+    testUserId: z.string().min(1, 'User ID is required').max(255, 'User ID must be less than 255 characters'),
+    testUserEmail: z.string().email('Invalid email address').min(5).optional().or(z.literal('')),
+    testUserName: z.string().max(255, 'Display name must be less than 255 characters').optional(),
+    testUserTags: z.record(z.string(), z.string()).refine((tags) => Object.keys(tags).length < 64, 'Max 64 tags allowed'),
+    overrideAuthParams: z.record(z.string(), z.string()),
+    overrideOauthScopes: z.string().optional(),
+    overrideDevAppCredentials: z.boolean(),
+    overrideDocUrl: z.string().optional().or(z.literal('')),
+    overrideWebhookUrl: z.string().url('Please enter a valid URL').optional().or(z.literal(''))
+});
+
+export type ConnectionFormData = z.infer<typeof schema>;
 
 export const ConnectionCreate: React.FC = () => {
     const env = useStore((state) => state.env);
-    const paramExtended = useSearchParam('extended');
     const paramIntegrationId = useSearchParam('integration_id');
 
-    const connectUI = useRef<ConnectUI>();
-
     const { user } = useUser(true);
-    const { list: listIntegration, loading } = useListIntegration(env);
+    const { data: listIntegrationData, isLoading } = useListIntegrations(env);
+    const listIntegration = listIntegrationData?.data;
 
-    const [integration, setIntegration] = useState<ApiIntegrationList>();
-    const [testUserEmail, setTestUserEmail] = useState(user!.email);
-    const [testUserId, setTestUserId] = useState(`test_${user!.name.toLocaleLowerCase().replaceAll(' ', '_')}`);
-    const [testUserName, setTestUserName] = useState(user!.name);
-    const [testOrgName, setTestOrgName] = useState('');
-    const [testOrgId, setTestOrgId] = useState('');
+    const [integration, setIntegration] = useState<ApiIntegrationList | undefined>();
+    const { data: provider } = useProvider(env, integration?.provider);
 
-    useUnmount(() => {
-        if (connectUI.current) {
-            connectUI.current.close();
-        }
+    const form = useForm<ConnectionFormData>({
+        resolver: zodResolver(schema),
+        defaultValues: {
+            testUserId: `test_${user!.name.toLocaleLowerCase().replaceAll(' ', '_')}`,
+            testUserEmail: user!.email,
+            testUserName: user!.name,
+            testUserTags: {},
+            overrideAuthParams: {},
+            overrideOauthScopes: undefined,
+            overrideDevAppCredentials: false,
+            overrideDocUrl: '',
+            overrideWebhookUrl: ''
+        },
+        mode: 'onChange'
     });
+
+    const formValues = form.watch();
+
+    const overrideClientId = formValues.overrideDevAppCredentials ? '' : undefined;
+    const overrideClientSecret = formValues.overrideDevAppCredentials ? '' : undefined;
+
+    // Reset form when integration changes
+    useEffect(() => {
+        form.reset({
+            testUserId: `test_${user!.name.toLocaleLowerCase().replaceAll(' ', '_')}`,
+            testUserEmail: user!.email,
+            testUserName: user!.name,
+            testUserTags: {},
+            overrideAuthParams: {},
+            overrideOauthScopes: integration?.oauth_scopes || undefined,
+            overrideDevAppCredentials: false,
+            overrideDocUrl: '',
+            overrideWebhookUrl: ''
+        });
+    }, [user, integration, form]);
+
+    // Update docUrl when provider loads
+    useEffect(() => {
+        if (provider?.data.docs_connect) {
+            form.setValue('overrideDocUrl', provider.data.docs_connect);
+        }
+    }, [provider, form]);
+
+    useEffect(() => {
+        track('web:create_connection:viewed', {});
+    }, []);
 
     useEffect(() => {
         if (paramIntegrationId && listIntegration) {
@@ -51,15 +101,18 @@ export const ConnectionCreate: React.FC = () => {
         }
     }, [paramIntegrationId, listIntegration]);
 
-    if (loading) {
+    const isOauth2 = useMemo(() => {
+        return integration && ['OAUTH2', 'MCP_OAUTH2', 'MCP_OAUTH2_GENERIC'].includes(integration.meta.authMode);
+    }, [integration]);
+
+    if (isLoading) {
         return (
-            <DashboardLayout>
+            <DashboardLayout fullWidth title="Create test connection" className={'max-w-[1250px]'}>
                 <Helmet>
                     <title>Create Test Connection - Nango</title>
                 </Helmet>
-                <div className="grid grid-cols-2 text-white">
+                <div className="grid grid-cols-2 text-text-strong">
                     <div className="pr-10 flex flex-col gap-10">
-                        <h1 className="text-2xl">Create test connection</h1>
                         <div className="flex flex-col gap-4">
                             <Skeleton className="w-full h-10" />
                             <Skeleton className="w-full" />
@@ -72,219 +125,50 @@ export const ConnectionCreate: React.FC = () => {
     }
 
     return (
-        <DashboardLayout>
+        <DashboardLayout fullWidth title="Create test connection" className={'max-w-[1250px]'}>
             <Helmet>
                 <title>Create Test Connection - Nango</title>
             </Helmet>
-            <div className="grid grid-cols-2 text-white">
-                <div className="pr-10">
+            <div className="grid grid-cols-[2fr_1fr] text-text-strong">
+                <div className="pr-5">
                     <div className="flex flex-col gap-8">
-                        <h1 className="text-2xl">Create a test connection</h1>
-                        <CreateConnectionSelector />
-
-                        <Info>
-                            The test connection will use the name & email address of your Nango dashboard account. In your app, you can pass your user’s
-                            details.
-                        </Info>
-
-                        {paramExtended && (
-                            <Collapsible>
-                                <CollapsibleTrigger className="text-grayscale-400" asChild>
-                                    <Button variant={'link'} size={'auto'} className="text-sm [&[data-state=open]>svg]:rotate-90">
-                                        <IconChevronRight size={18} stroke={1} className="transition-transform duration-200" /> Test user info
-                                    </Button>
-                                </CollapsibleTrigger>
-                                <CollapsibleContent className="pt-8 flex flex-col gap-8">
-                                    <div className="flex flex-col gap-4">
-                                        <label htmlFor="test_user_email" className="flex gap-2 items-center">
-                                            Test User Email
-                                            <div>
-                                                <span className="text-alert-400 text-s align-super">*</span>
-                                            </div>
-                                            <SimpleTooltip
-                                                side="right"
-                                                align="center"
-                                                tooltipContent={
-                                                    <p className="text-s">
-                                                        Emulate your End User Email. In your production this would be your user&apos;s email.
-                                                        <br />
-                                                        <Link
-                                                            to="https://nango.dev/docs/reference/api/connect/sessions/create"
-                                                            className="underline"
-                                                            target="_blank"
-                                                        >
-                                                            Documentation
-                                                        </Link>
-                                                    </p>
-                                                }
-                                            >
-                                                <IconHelpCircle stroke={1} size={18} className="text-grayscale-500" />
-                                            </SimpleTooltip>
-                                        </label>
-                                        <Input
-                                            variant={'black'}
-                                            inputSize={'lg'}
-                                            id="test_user_email"
-                                            placeholder="you@email.com"
-                                            autoComplete="email"
-                                            type="email"
-                                            value={testUserEmail}
-                                            onChange={(e) => setTestUserEmail(e.target.value)}
-                                        />
-                                    </div>
-                                    <div className="flex flex-col gap-4">
-                                        <label htmlFor="test_user_id" className="flex gap-2">
-                                            Test User ID
-                                            <div>
-                                                <span className="text-alert-400 text-s align-super">*</span>
-                                            </div>
-                                            <SimpleTooltip
-                                                side="right"
-                                                align="center"
-                                                tooltipContent={
-                                                    <p className="text-s">
-                                                        Emulate your End User ID. In your production this would be your user&apos;s id.
-                                                        <br />
-                                                        <Link
-                                                            to="https://nango.dev/docs/reference/api/connect/sessions/create"
-                                                            className="underline"
-                                                            target="_blank"
-                                                        >
-                                                            Documentation
-                                                        </Link>
-                                                    </p>
-                                                }
-                                            >
-                                                <IconHelpCircle stroke={1} size={18} className="text-grayscale-500" />
-                                            </SimpleTooltip>
-                                        </label>
-                                        <Input
-                                            variant={'black'}
-                                            inputSize={'lg'}
-                                            id="test_user_id"
-                                            placeholder="Your user internal ID"
-                                            value={testUserId}
-                                            onChange={(e) => setTestUserId(e.target.value)}
-                                        />
-                                    </div>
-                                    <div className="flex flex-col gap-4">
-                                        <label htmlFor="test_user_display_name" className="flex gap-2">
-                                            Test User Display Name
-                                            <SimpleTooltip
-                                                side="right"
-                                                align="center"
-                                                tooltipContent={
-                                                    <p className="text-s">
-                                                        Emulate your End User Display Name. In your production this would be your user&apos;s display name.
-                                                        <br />
-                                                        <Link
-                                                            to="https://nango.dev/docs/reference/api/connect/sessions/create"
-                                                            className="underline"
-                                                            target="_blank"
-                                                        >
-                                                            Documentation
-                                                        </Link>
-                                                    </p>
-                                                }
-                                            >
-                                                <IconHelpCircle stroke={1} size={18} className="text-grayscale-500" />
-                                            </SimpleTooltip>
-                                        </label>
-                                        <Input
-                                            variant={'black'}
-                                            inputSize={'lg'}
-                                            id="test_user_id"
-                                            placeholder="Your user internal ID"
-                                            value={testUserName}
-                                            onChange={(e) => setTestUserName(e.target.value)}
-                                        />
-                                    </div>
-                                    <div className="flex flex-col gap-4">
-                                        <label htmlFor="test_org_id" className="flex gap-2">
-                                            Test User Organization ID
-                                            <SimpleTooltip
-                                                side="right"
-                                                align="center"
-                                                tooltipContent={
-                                                    <p className="text-s">
-                                                        Emulate your End User Organization ID. In your production this would be your user&apos;s organization
-                                                        ID.
-                                                        <br />
-                                                        <Link
-                                                            to="https://nango.dev/docs/reference/api/connect/sessions/create"
-                                                            className="underline"
-                                                            target="_blank"
-                                                        >
-                                                            Documentation
-                                                        </Link>
-                                                    </p>
-                                                }
-                                            >
-                                                <IconHelpCircle stroke={1} size={18} className="text-grayscale-500" />
-                                            </SimpleTooltip>
-                                        </label>
-                                        <Input
-                                            variant={'black'}
-                                            inputSize={'lg'}
-                                            id="test_org_id"
-                                            placeholder="Your user's organization ID"
-                                            value={testOrgId}
-                                            onChange={(e) => setTestOrgId(e.target.value)}
-                                        />
-                                    </div>
-                                    <div className="flex flex-col gap-4">
-                                        <label htmlFor="test_org_name" className="flex gap-2">
-                                            Test User Organization Name
-                                            <SimpleTooltip
-                                                side="right"
-                                                align="center"
-                                                tooltipContent={
-                                                    <p className="text-s">
-                                                        Emulate your End User Organization Name. In your production this would be your user&apos;s organization
-                                                        name.
-                                                        <br />
-                                                        <Link
-                                                            to="https://nango.dev/docs/reference/api/connect/sessions/create"
-                                                            className="underline"
-                                                            target="_blank"
-                                                        >
-                                                            Documentation
-                                                        </Link>
-                                                    </p>
-                                                }
-                                            >
-                                                <IconHelpCircle stroke={1} size={18} className="text-grayscale-500" />
-                                            </SimpleTooltip>
-                                        </label>
-                                        <Input
-                                            variant={'black'}
-                                            inputSize={'lg'}
-                                            id="test_org_name"
-                                            placeholder="Your user's organization name"
-                                            value={testOrgName}
-                                            onChange={(e) => setTestOrgName(e.target.value)}
-                                        />
-                                    </div>
-                                </CollapsibleContent>
-                            </Collapsible>
-                        )}
+                        <CreateConnectionSelector
+                            integration={integration}
+                            setIntegration={setIntegration}
+                            testUserId={formValues.testUserId ?? ''}
+                            testUserEmail={formValues.testUserEmail ?? ''}
+                            testUserName={formValues.testUserName ?? ''}
+                            testUserTags={formValues.testUserTags ?? {}}
+                            overrideAuthParams={formValues.overrideAuthParams ?? {}}
+                            overrideOauthScopes={formValues.overrideOauthScopes}
+                            overrideClientId={overrideClientId}
+                            overrideClientSecret={overrideClientSecret}
+                            overrideDocUrl={formValues.overrideDocUrl}
+                            overrideWebhookUrl={formValues.overrideWebhookUrl}
+                            defaultDocUrl={provider?.data.docs_connect}
+                            isFormValid={form.formState.isValid}
+                        />
+                        <Form {...form}>
+                            <ConnectionAdvancedConfig isOauth2={isOauth2} />
+                        </Form>
                         <div className="flex gap-4">
                             <ButtonLink
                                 to={`/${env}/connections/create-legacy?${integration ? `providerConfigKey=${integration.unique_key}` : ''}`}
                                 size="md"
-                                variant={'link'}
+                                variant={'ghost'}
+                                className={'text-text-muted'}
                             >
-                                Or use deprecated flow <IconChevronRight stroke={1} size={18} />
+                                Use deprecated flow <ExternalLink className="size-4.5 text-text-muted" />
                             </ButtonLink>
                         </div>
                     </div>
                 </div>
-                <div className="border-l border-l-grayscale-800 pl-10">
+                <div className="border-l border-l-border-strong pl-10">
                     <div className="flex flex-col gap-10">
                         <h1 className="text-2xl">Embed in your app</h1>
                         <a
-                            className="transition-all block border rounded-lg border-grayscale-700 p-7 group hover:border-gray-600 hover:shadow-card focus:shadow-card focus:border-gray-600 focus:outline-0"
-                            href="https://nango.dev/docs/implementation-guides/api-auth/implement-api-auth"
+                            className="transition-all block border rounded-lg border-border-muted p-7 group hover:border-border-strong focus:border-border-strong focus:outline-0"
+                            href="https://nango.dev/docs/guides/auth/auth-guide"
                             target="_blank"
                             rel="noreferrer"
                         >
@@ -292,12 +176,12 @@ export const ConnectionCreate: React.FC = () => {
                                 <div className="flex gap-3 items-start">
                                     <h2>Authorize users from your app</h2>
                                 </div>
-                                <div className="rounded-full border border-grayscale-700 p-1.5 h-8 w-8">
-                                    <IconBook stroke={1} size={18} />
+                                <div className="rounded-full border border-border-muted p-1.5 h-8 w-8">
+                                    <Book strokeWidth={1} size={18} />
                                 </div>
                             </header>
                             <main>
-                                <p className="text-sm text-grayscale-400">
+                                <p className="text-sm text-text-muted">
                                     Learn how to embed Nango in your app to let users authorize 3rd-party APIs seamlessly.
                                 </p>
                             </main>

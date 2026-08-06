@@ -7,10 +7,10 @@ import { ConnectUI } from './connectUI.js';
 import type { ConnectUIProps } from './connectUI.js';
 import type {
     ApiKeyCredentials,
-    AppStoreCredentials,
     AuthErrorType,
     AuthOptions,
     AuthSuccess,
+    AwsSigV4Credentials,
     BasicApiCredentials,
     BillCredentials,
     ConnectionConfig,
@@ -225,7 +225,7 @@ export default class Nango {
                     return;
                 }
 
-                if (this.win.modal.window && !this.win.modal.closed) {
+                if (!this.win.modal.closed) {
                     return;
                 }
 
@@ -260,6 +260,8 @@ export default class Nango {
 
     /**
      * Clear state of the frontend SDK
+     * Delays closing the popup so the callback page can postMessage to conect ui
+     * and the opener can process the message before the popup is destroyed.
      */
     public clear() {
         if (this.tm) {
@@ -267,13 +269,15 @@ export default class Nango {
         }
 
         if (this.win) {
-            try {
-                this.win.close();
-            } catch (err) {
-                console.log('err', err);
-                // do nothing
-            }
+            const windowRef = this.win;
             this.win = null;
+            setTimeout(() => {
+                try {
+                    windowRef.close();
+                } catch {
+                    // ignore
+                }
+            }, 500);
         }
     }
 
@@ -296,13 +300,13 @@ export default class Nango {
             | OAuthCredentialsOverride
             | BasicApiCredentials
             | ApiKeyCredentials
-            | AppStoreCredentials
             | TBACredentials
             | JwtCredentials
             | OAuth2ClientCredentials
             | BillCredentials
             | TwoStepCredentials
             | SignatureCredentials
+            | AwsSigV4Credentials
     ): ConnectionConfig {
         const params: Record<string, string> = {};
 
@@ -316,6 +320,17 @@ export default class Nango {
             return { params: signatureCredentials } as unknown as ConnectionConfig;
         }
 
+        if ('type' in credentials && credentials.type === 'AWS_SIGV4') {
+            const awsCredentials: Record<string, string> = {
+                type: credentials.type,
+                role_arn: credentials['role_arn']
+            };
+            if (credentials['region']) {
+                awsCredentials['region'] = credentials['region'];
+            }
+            return { params: awsCredentials } as unknown as ConnectionConfig;
+        }
+
         if ('username' in credentials) {
             params['username'] = credentials.username || '';
         }
@@ -325,9 +340,15 @@ export default class Nango {
         if ('apiKey' in credentials) {
             params['apiKey'] = credentials.apiKey || '';
         }
+        if ('role_arn' in credentials) {
+            params['role_arn'] = credentials['role_arn'];
+        }
+        if ('region' in credentials && credentials['region']) {
+            params['region'] = credentials['region'];
+        }
 
         if (
-            // for backwards compatibility with the old JWT credentials (ghost-admin)
+            // for backwards compatibility with the old JWT credentials (ghost-admin, apple-app-store)
             'privateKey' in credentials ||
             ('type' in credentials && credentials.type === 'JWT')
         ) {
@@ -341,22 +362,7 @@ export default class Nango {
             return { params: credentials } as unknown as ConnectionConfig;
         }
 
-        if ('privateKeyId' in credentials && 'issuerId' in credentials && 'privateKey' in credentials) {
-            const appStoreCredentials: { params: Record<string, string | string[]> } = {
-                params: {
-                    privateKeyId: credentials['privateKeyId'],
-                    issuerId: credentials['issuerId'],
-                    privateKey: credentials['privateKey']
-                }
-            };
-
-            if ('scope' in credentials && (typeof credentials['scope'] === 'string' || Array.isArray(credentials['scope']))) {
-                appStoreCredentials.params['scope'] = credentials['scope'];
-            }
-            return appStoreCredentials as unknown as ConnectionConfig;
-        }
-
-        if ('client_id' in credentials && 'client_secret' in credentials) {
+        if ('client_id' in credentials && ('client_secret' in credentials || 'client_private_key' in credentials)) {
             const oauth2CCCredentials: OAuth2ClientCredentials = {
                 client_id: credentials.client_id,
                 client_secret: credentials.client_secret,
@@ -406,27 +412,37 @@ export default class Nango {
 
     private async triggerAuth({
         authUrl,
-        credentials
+        credentials,
+        assertionOption
     }: {
         authUrl: string;
         credentials?:
             | ApiKeyCredentials
             | BasicApiCredentials
-            | AppStoreCredentials
             | TBACredentials
             | JwtCredentials
             | BillCredentials
             | OAuth2ClientCredentials
             | TwoStepCredentials
             | SignatureCredentials
+            | AwsSigV4Credentials
             | undefined;
+        assertionOption?: Record<string, string>;
     }): Promise<AuthSuccess> {
+        const body: Record<string, any> = {};
+        if (credentials) {
+            Object.assign(body, credentials);
+        }
+        if (assertionOption && Object.keys(assertionOption).length > 0) {
+            body['assertionOption'] = assertionOption;
+        }
+
         const res = await fetch(authUrl, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
-            ...(credentials ? { body: JSON.stringify(credentials) } : {})
+            ...(Object.keys(body).length > 0 ? { body: JSON.stringify(body) } : {})
         });
 
         if (!res.ok) {
@@ -459,9 +475,11 @@ export default class Nango {
         }
 
         if ('type' in credentials && credentials['type'] === 'TWO_STEP') {
+            const assertionOption = connectionConfig?.assertionOption as Record<string, any> | undefined;
             return await this.triggerAuth({
                 authUrl: this.hostBaseUrl + `/auth/two-step/${providerConfigKey}${this.toQueryString(connectionId, connectionConfig as ConnectionConfig)}`,
-                credentials: credentials as unknown as TwoStepCredentials
+                credentials: credentials as unknown as TwoStepCredentials,
+                ...(assertionOption ? { assertionOption } : {})
             });
         }
 
@@ -469,6 +487,16 @@ export default class Nango {
             return await this.triggerAuth({
                 authUrl: this.hostBaseUrl + `/auth/signature/${providerConfigKey}${this.toQueryString(connectionId, connectionConfig as ConnectionConfig)}`,
                 credentials: credentials as unknown as SignatureCredentials
+            });
+        }
+
+        if ('type' in credentials && credentials['type'] === 'AWS_SIGV4' && 'role_arn' in credentials) {
+            return await this.triggerAuth({
+                authUrl: this.hostBaseUrl + `/auth/aws-sigv4/${providerConfigKey}${this.toQueryString(connectionId, connectionConfig as ConnectionConfig)}`,
+                credentials: {
+                    role_arn: credentials['role_arn'],
+                    region: credentials['region']
+                }
             });
         }
 
@@ -500,13 +528,6 @@ export default class Nango {
             });
         }
 
-        if ('privateKeyId' in credentials && 'issuerId' in credentials && 'privateKey' in credentials) {
-            return await this.triggerAuth({
-                authUrl: this.hostBaseUrl + `/app-store-auth/${providerConfigKey}${this.toQueryString(connectionId, connectionConfig as ConnectionConfig)}`,
-                credentials: credentials as unknown as AppStoreCredentials
-            });
-        }
-
         if ('token_id' in credentials && 'token_secret' in credentials) {
             return await this.triggerAuth({
                 authUrl: this.hostBaseUrl + `/auth/tba/${providerConfigKey}${this.toQueryString(connectionId, connectionConfig as ConnectionConfig)}`,
@@ -514,7 +535,7 @@ export default class Nango {
             });
         }
 
-        if ('client_id' in credentials && 'client_secret' in credentials) {
+        if ('client_id' in credentials && ('client_secret' in credentials || 'client_private_key' in credentials)) {
             return await this.triggerAuth({
                 authUrl: this.hostBaseUrl + `/oauth2/auth/${providerConfigKey}${this.toQueryString(connectionId, connectionConfig as ConnectionConfig)}`,
                 credentials: credentials as unknown as OAuth2ClientCredentials
@@ -573,6 +594,10 @@ export default class Nango {
                 }
                 if ('oauth_client_secret_override' in credentials) {
                     query.push(`credentials[oauth_client_secret_override]=${encodeURIComponent(credentials.oauth_client_secret_override)}`);
+                }
+
+                if ('oauth_refresh_token_override' in credentials) {
+                    query.push(`credentials[oauth_refresh_token_override]=${encodeURIComponent(credentials.oauth_refresh_token_override)}`);
                 }
 
                 if ('token_id' in credentials) {

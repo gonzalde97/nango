@@ -11,6 +11,18 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 export function jsonSchemaToZod(schema: SimplifiedJSONSchema): ZodTypeAny {
+    if (schema.hidden) {
+        return z.string().optional();
+    }
+
+    if (schema.enum && schema.enum.length > 0) {
+        const enumSchema = z.enum(schema.enum as [string, ...string[]]);
+        if ('optional' in schema && schema.optional === true) {
+            return z.union([enumSchema, z.literal('')]);
+        }
+        return enumSchema;
+    }
+
     let fieldString = z.string();
     if (schema.format === 'hostname') {
         fieldString = fieldString.regex(/^[a-zA-Z0-9.-]+$/, 'Invalid hostname');
@@ -38,4 +50,21 @@ export function jsonSchemaToZod(schema: SimplifiedJSONSchema): ZodTypeAny {
     }
 
     return fieldString;
+}
+
+export function getAllowedCallbackOrigin(apiURL: string): string | null {
+    try {
+        return new URL(apiURL).origin;
+    } catch {
+        return null;
+    }
+}
+
+export function compactErrorDisplay(message: string): string {
+    try {
+        const parsed = JSON.parse(message);
+        return JSON.stringify(parsed);
+    } catch {
+        return message;
+    }
 }

@@ -1,18 +1,18 @@
 import db from '@nangohq/database';
 import { logContextGetter } from '@nangohq/logs';
-import { NangoError, accountService, configService, environmentService, getApiUrl, getEndUserByConnectionId } from '@nangohq/shared';
+import { accountService, configService, environmentService, getApiUrl, getEndUserByConnectionId, NangoError, secretService } from '@nangohq/shared';
 import { Err, Ok, tagTraceUser } from '@nangohq/utils';
 
 import { bigQueryClient } from '../clients.js';
-import { startScript } from './operations/start.js';
 import { capping } from '../utils/capping.js';
 import { getRunnerFlags } from '../utils/flags.js';
-import { setTaskFailed, setTaskSuccess } from './operations/state.js';
 import { pubsub } from '../utils/pubsub.js';
+import { startScript } from './operations/start.js';
+import { setTaskFailed, setTaskSuccess } from './operations/state.js';
 
 import type { TaskOnEvent } from '@nangohq/nango-orchestrator';
 import type { Config } from '@nangohq/shared';
-import type { ConnectionJobs, DBEnvironment, DBSyncConfig, DBTeam, NangoProps, SdkLogger, TelemetryBag } from '@nangohq/types';
+import type { ConnectionJobs, DBEnvironment, DBSyncConfig, DBTeam, FunctionRuntime, NangoProps, RoutingContext, SdkLogger, TelemetryBag } from '@nangohq/types';
 import type { Result } from '@nangohq/utils';
 
 export async function startOnEvent(task: TaskOnEvent): Promise<Result<void>> {
@@ -90,15 +90,20 @@ export async function startOnEvent(task: TaskOnEvent): Promise<Result<void>> {
             webhook_subscriptions: [],
             attributes: {},
             input: null,
-            is_public: false,
+            source: 'repo',
             metadata: {},
             models_json_schema: null,
-            pre_built: false,
             sync_type: null,
             sdk_version: task.sdkVersion,
+            features: [],
             created_at: new Date(),
             updated_at: new Date()
         };
+
+        const defaultSecret = await secretService.getDefaultSecretForEnv(db.readOnly, environment);
+        if (defaultSecret.isErr()) {
+            return Err(defaultSecret.error);
+        }
 
         const nangoProps: NangoProps = {
             scriptType: 'on-event',
@@ -113,20 +118,26 @@ export async function startOnEvent(task: TaskOnEvent): Promise<Result<void>> {
             providerConfigKey: task.connection.provider_config_key,
             provider: providerConfig.provider,
             activityLogId: logCtx.id,
-            secretKey: environment.secret_key,
+            secretKey: defaultSecret.value.secret,
             nangoConnectionId: task.connection.id,
             syncConfig,
             debug: false,
             logger: sdkLogger,
-            runnerFlags: await getRunnerFlags(),
+            runnerFlags: getRunnerFlags(plan),
             startedAt: new Date(),
             endUser,
             heartbeatTimeoutSecs: task.heartbeatTimeoutSecs
         };
 
+        const routingContext: RoutingContext = {
+            plan: plan,
+            features: []
+        };
+
         const res = await startScript({
             taskId: task.id,
             nangoProps,
+            routingContext,
             logCtx: logCtx
         });
 
@@ -161,11 +172,13 @@ export async function startOnEvent(task: TaskOnEvent): Promise<Result<void>> {
 export async function handleOnEventSuccess({
     taskId,
     nangoProps,
-    telemetryBag
+    telemetryBag,
+    functionRuntime
 }: {
     taskId: string;
     nangoProps: NangoProps;
     telemetryBag: TelemetryBag;
+    functionRuntime: FunctionRuntime;
 }): Promise<void> {
     await setTaskSuccess({ taskId, output: null });
 
@@ -191,7 +204,8 @@ export async function handleOnEventSuccess({
         runTimeInSeconds: (new Date().getTime() - nangoProps.startedAt.getTime()) / 1000,
         createdAt: Date.now(),
         internalIntegrationId: nangoProps.syncConfig.nango_config_id,
-        endUser: nangoProps.endUser
+        endUser: nangoProps.endUser,
+        source: nangoProps.syncConfig.source
     });
     void pubsub.publisher.publish({
         subject: 'usage',
@@ -207,7 +221,8 @@ export async function handleOnEventSuccess({
                 functionName: nangoProps.syncConfig.sync_name,
                 type: 'on-event',
                 success: true,
-                telemetryBag
+                telemetryBag,
+                runtime: functionRuntime
             }
         }
     });
@@ -217,12 +232,14 @@ export async function handleOnEventError({
     taskId,
     nangoProps,
     error,
-    telemetryBag
+    telemetryBag,
+    functionRuntime
 }: {
     taskId: string;
     nangoProps: NangoProps;
     error: NangoError;
     telemetryBag: TelemetryBag;
+    functionRuntime: FunctionRuntime;
 }): Promise<void> {
     await setTaskFailed({ taskId, error });
 
@@ -242,7 +259,8 @@ export async function handleOnEventError({
         syncConfig: nangoProps.syncConfig,
         ...(nangoProps.team ? { team: { id: nangoProps.team.id, name: nangoProps.team.name } } : {}),
         endUser: nangoProps.endUser,
-        telemetryBag
+        telemetryBag,
+        functionRuntime
     });
 }
 
@@ -257,7 +275,8 @@ function onFailure({
     runTime,
     error,
     endUser,
-    telemetryBag
+    telemetryBag,
+    functionRuntime
 }: {
     connection: ConnectionJobs;
     team?: { id: number; name: string };
@@ -270,6 +289,7 @@ function onFailure({
     error: NangoError;
     endUser: NangoProps['endUser'];
     telemetryBag?: TelemetryBag | undefined;
+    functionRuntime?: FunctionRuntime | undefined;
 }): void {
     const logCtx = team ? logContextGetter.get({ id: activityLogId, accountId: team.id }) : null;
     void logCtx?.error(error.message, { error });
@@ -293,7 +313,8 @@ function onFailure({
             runTimeInSeconds: runTime,
             createdAt: Date.now(),
             internalIntegrationId: syncConfig?.nango_config_id || null,
-            endUser
+            endUser,
+            source: syncConfig?.source
         });
 
         void pubsub.publisher.publish({
@@ -310,7 +331,8 @@ function onFailure({
                     functionName: syncName,
                     type: 'on-event',
                     success: false,
-                    telemetryBag
+                    telemetryBag,
+                    runtime: functionRuntime
                 }
             }
         });

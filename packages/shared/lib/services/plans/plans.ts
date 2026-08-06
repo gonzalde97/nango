@@ -1,39 +1,70 @@
 import ms from 'ms';
 
-import { Err, Ok } from '@nangohq/utils';
+import { Err, flagHasPlan, Ok } from '@nangohq/utils';
 
-import { freePlan, isPotentialDowngrade, plansList } from './definitions.js';
 import { productTracking } from '../../utils/productTracking.js';
+import { freePlan, isPotentialDowngrade, plansList } from './definitions.js';
 
-import type { DBPlan, DBTeam, PlanDefinition } from '@nangohq/types';
+import type { DBEnvironment, DBPlan, DBTeam, PlanDefinition } from '@nangohq/types';
 import type { Result } from '@nangohq/utils';
 import type { Knex } from 'knex';
 
 export const TRIAL_DURATION = ms('15days');
 
-export async function getPlan(db: Knex, { accountId }: { accountId: number }): Promise<Result<DBPlan>> {
-    try {
-        const res = await db.from<DBPlan>('plans').select<DBPlan>('*').where('account_id', accountId).first();
-        return res ? Ok(res) : Err(new Error('unknown_plan_for_account'));
-    } catch (err) {
-        return Err(new Error('failed_to_get_plan', { cause: err }));
-    }
+function getTrialStartFields(
+    plan: Pick<DBPlan, 'trial_start_at' | 'trial_extension_count'>
+): Pick<DBPlan, 'trial_start_at' | 'trial_end_at' | 'trial_end_notified_at' | 'trial_extension_count' | 'trial_expired'> {
+    return {
+        trial_start_at: plan.trial_start_at || new Date(),
+        trial_end_at: new Date(Date.now() + TRIAL_DURATION),
+        trial_end_notified_at: null,
+        trial_extension_count: plan.trial_extension_count + 1,
+        trial_expired: false
+    };
 }
 
-export async function getPlanBy(db: Knex, opts: Partial<Pick<DBPlan, 'stripe_customer_id'>>): Promise<Result<DBPlan>> {
+export async function getPlan(
+    db: Knex,
+    opts: Partial<{
+        accountId: DBPlan['account_id'];
+        environmentId: DBEnvironment['id'];
+        stripeCustomerId: DBPlan['stripe_customer_id'];
+    }>
+): Promise<Result<DBPlan>> {
     if (Object.keys(opts).length <= 0) {
-        return Err(new Error('getPlanBy_missing_opts'));
+        return Err(new Error('getPlan_missing_opts'));
     }
     try {
         const query = db.from<DBPlan>('plans').select<DBPlan>('*');
-        if (opts.stripe_customer_id) {
-            query.where('stripe_customer_id', opts.stripe_customer_id);
+        if (opts.accountId) {
+            query.where('account_id', opts.accountId);
+        }
+        if (opts.stripeCustomerId) {
+            query.where('stripe_customer_id', opts.stripeCustomerId);
+        }
+        if (opts.environmentId) {
+            query
+                .join<DBEnvironment>('_nango_environments', '_nango_environments.account_id', 'plans.account_id')
+                .where('_nango_environments.id', opts.environmentId);
         }
         const res = await query.first();
         return res ? Ok(res) : Err(new Error('unknown_plan_for_condition'));
     } catch (err) {
         return Err(new Error('failed_to_get_plan', { cause: err }));
     }
+}
+
+export async function getPlanSafe(
+    db: Knex,
+    opts: Partial<{
+        accountId: DBPlan['account_id'];
+        environmentId: DBEnvironment['id'];
+        stripeCustomerId: DBPlan['stripe_customer_id'];
+    }>
+): Promise<DBPlan | null> {
+    if (!flagHasPlan) return null;
+    const plan = await getPlan(db, opts);
+    return plan.isOk() ? plan.value : null;
 }
 
 export async function createPlan(
@@ -88,11 +119,7 @@ export async function updatePlanByTeam(
 export async function startTrial(db: Knex, plan: DBPlan): Promise<Result<boolean>> {
     return await updatePlan(db, {
         id: plan.id,
-        trial_start_at: plan.trial_start_at || new Date(),
-        trial_end_at: new Date(Date.now() + TRIAL_DURATION),
-        trial_end_notified_at: null,
-        trial_extension_count: plan.trial_extension_count + 1,
-        trial_expired: false
+        ...getTrialStartFields(plan)
     });
 }
 
@@ -105,7 +132,8 @@ export async function getTrialsApproachingExpiration(db: Knex, { daysLeft }: { d
             .select<DBPlan[]>('plans.*')
             .join('_nango_accounts', '_nango_accounts.id', 'plans.account_id')
             .where('trial_end_at', '<=', dateThreshold.toISOString())
-            .whereNull('trial_end_notified_at');
+            .whereNull('trial_end_notified_at')
+            .where('plans.auto_idle', true);
         return Ok(res);
     } catch (err) {
         return Err(new Error('failed_to_get_trials', { cause: err }));
@@ -117,7 +145,8 @@ export async function getExpiredTrials(db: Knex): Promise<DBPlan[]> {
         .from('plans')
         .select<DBPlan[]>('*')
         .where('plans.trial_end_at', '<=', db.raw('NOW()'))
-        .where((b) => b.where('plans.trial_expired', false).orWhereNull('plans.trial_expired'));
+        .where((b) => b.where('plans.trial_expired', false).orWhereNull('plans.trial_expired'))
+        .where('plans.auto_idle', true);
 }
 
 export async function handlePlanChanged(
@@ -147,6 +176,8 @@ export async function handlePlanChanged(
     const isCurrentFree = currentPlan.value.name === freePlan.code;
     const isNewPaid = newPlan.code !== freePlan.code;
 
+    const isDowngrade = isPotentialDowngrade({ from: currentPlan.value.name, to: newPlan.code });
+
     const updated = await updatePlanByTeam(db, {
         account_id: team.id,
         name: newPlan.code,
@@ -155,6 +186,16 @@ export async function handlePlanChanged(
         orb_future_plan_at: null,
         ...(orbCustomerId ? { orb_customer_id: orbCustomerId } : {}),
         ...(isCurrentFree && isNewPaid ? { orb_subscribed_at: new Date() } : {}),
+        ...(currentPlan.value.auto_idle && mergedFlags.auto_idle === false
+            ? {
+                  trial_start_at: null,
+                  trial_end_at: null,
+                  trial_end_notified_at: null,
+                  trial_extension_count: 0,
+                  trial_expired: null
+              }
+            : {}),
+        ...(isDowngrade && !isNewPaid ? getTrialStartFields(currentPlan.value) : {}),
         ...mergedFlags
     });
 
@@ -165,7 +206,7 @@ export async function handlePlanChanged(
     productTracking.track({
         name: 'account:billing:plan_changed',
         team,
-        eventProperties: { previousPlan: currentPlan.value.name, newPlan: newPlanCode, orbCustomerId: currentPlan.value.orb_customer_id }
+        eventProperties: { previousPlan: currentPlan.value.name, newPlan: newPlanCode, isDowngrade, orbCustomerId: currentPlan.value.orb_customer_id }
     });
 
     return Ok(true);
@@ -204,23 +245,33 @@ export function mergeFlags({ currentPlan, newPlanDefinition }: { currentPlan: DB
             case 'trial_extension_count':
             case 'trial_end_notified_at':
             case 'trial_expired':
+            case 'fleet_node_routing_override':
+            case 'records_store':
             case 'created_at':
             case 'updated_at':
                 break;
             // BOOLEAN FLAGS - keep override if false
+            case 'has_records_autopruning':
             case 'auto_idle': {
                 overrides[key] = !currentPlan[key] ? false : newPlanDefinition.flags[key];
                 break;
             }
             // BOOLEAN FLAGS - keep override if true
             case 'has_otel':
-            case 'has_sync_variants':
             case 'has_webhooks_script':
             case 'has_webhooks_forward':
+            case 'has_rbac':
             case 'can_disable_connect_ui_watermark':
             case 'can_override_docs_connect_url':
-            case 'can_customize_connect_ui_theme': {
+            case 'can_customize_connect_ui_theme':
+            case 'export_runner_telemetry': {
                 overrides[key] = currentPlan[key] ? true : newPlanDefinition.flags[key];
+                break;
+            }
+            // BOOLEAN FLAGS - keep override if different
+            case 'lambda_tenant_isolation':
+            case 'sync_lambda_checkpoint_required': {
+                overrides[key] = currentPlan[key] !== newPlanDefinition.flags[key] ? newPlanDefinition.flags[key] : currentPlan[key];
                 break;
             }
             // NUMBER FLAGS - keep override if higher, null means unlimited
@@ -241,7 +292,8 @@ export function mergeFlags({ currentPlan, newPlanDefinition }: { currentPlan: DB
                 break;
             }
             // NUMBER FLAGS - keep override if higher
-            case 'environments_max': {
+            case 'environments_max':
+            case 'variants_per_sync_max': {
                 const currentValue = currentPlan[key];
                 const newValue = newPlanDefinition.flags[key] || 0;
                 if (currentValue > newValue) {
@@ -258,6 +310,14 @@ export function mergeFlags({ currentPlan, newPlanDefinition }: { currentPlan: DB
                 }
                 break;
             }
+            // FUNCTION RUNTIME FLAGS - keep override if different
+            case 'sync_function_runtime':
+            case 'action_function_runtime':
+            case 'webhook_function_runtime':
+            case 'on_event_function_runtime': {
+                overrides[key] = currentPlan[key] !== newPlanDefinition.flags[key] ? newPlanDefinition.flags[key] : currentPlan[key];
+                break;
+            }
             // SPECIAL CASES
             case 'api_rate_limit_size': {
                 const sizeIndex: Record<DBPlan['api_rate_limit_size'], number> = {
@@ -267,7 +327,15 @@ export function mergeFlags({ currentPlan, newPlanDefinition }: { currentPlan: DB
                     xl: 4,
                     '2xl': 5,
                     '3xl': 6,
-                    '4xl': 7
+                    '4xl': 7,
+                    '5xl': 8,
+                    '6xl': 9,
+                    '7xl': 10,
+                    '8xl': 11,
+                    '9xl': 12,
+                    '10xl': 13,
+                    '11xl': 14,
+                    '12xl': 15
                 };
                 const currentIndex = sizeIndex[currentPlan[key]];
                 const newIndex = sizeIndex[newPlanDefinition.flags[key]];
@@ -284,4 +352,26 @@ export function mergeFlags({ currentPlan, newPlanDefinition }: { currentPlan: DB
     }
 
     return { ...newPlanDefinition.flags, ...overrides };
+}
+
+/** Lambda keep-warm invoke count multiplier by billing plan (`plans.name`). */
+export function lambdaKeepWarmProvisionedConcurrencyMultiplier(planName: DBPlan['name'], isProduction: DBEnvironment['is_production']): number {
+    if (!isProduction) {
+        return 1;
+    }
+    switch (planName) {
+        case 'free':
+            return 1;
+        case 'starter':
+        case 'starter-legacy':
+        case 'starter-v2':
+            return 2;
+        case 'scale-legacy':
+            return 3;
+        case 'growth':
+        case 'growth-v2':
+            return 4;
+        default:
+            return 1;
+    }
 }

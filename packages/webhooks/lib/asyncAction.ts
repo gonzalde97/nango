@@ -1,22 +1,24 @@
 import { metrics } from '@nangohq/utils';
 
-import { deliver, shouldSend } from './utils.js';
+import { deliver, resolveWebhookSettings, shouldSend } from './utils.js';
 
 import type { LogContext } from '@nangohq/logs';
-import type { AsyncActionResponse, DBEnvironment, DBExternalWebhook, NangoAsyncActionWebhookBody } from '@nangohq/types';
+import type { AsyncActionResponse, DBAPISecret, DBExternalWebhook, NangoAsyncActionWebhookBody } from '@nangohq/types';
 
 export const sendAsyncActionWebhook = async ({
-    environment,
+    secret,
     connectionId,
     providerConfigKey,
     webhookSettings,
+    webhookUrlOverride,
     payload,
     logCtx
 }: {
-    environment: DBEnvironment;
+    secret: DBAPISecret['secret'];
     connectionId: string;
     providerConfigKey: string;
     webhookSettings: DBExternalWebhook | null;
+    webhookUrlOverride: string | null;
     payload: AsyncActionResponse;
     logCtx: LogContext;
 }): Promise<void> => {
@@ -24,7 +26,9 @@ export const sendAsyncActionWebhook = async ({
         return;
     }
 
-    if (!shouldSend({ success: true, type: 'async_action', webhookSettings })) {
+    const settings = resolveWebhookSettings(webhookSettings, webhookUrlOverride);
+
+    if (!shouldSend({ success: true, type: 'async_action', webhookSettings: settings })) {
         return;
     }
 
@@ -37,15 +41,15 @@ export const sendAsyncActionWebhook = async ({
     };
 
     const webhooks = [
-        { url: webhookSettings.primary_url, type: 'webhook url' },
-        { url: webhookSettings.secondary_url, type: 'secondary webhook url' }
+        { url: settings.primary_url, type: 'webhook url' },
+        { url: settings.secondary_url, type: 'secondary webhook url' }
     ].filter((webhook) => webhook.url) as { url: string; type: string }[];
 
     const result = await deliver({
         webhooks,
         body,
         webhookType: 'async_action',
-        environment,
+        secret,
         logCtx
     });
 

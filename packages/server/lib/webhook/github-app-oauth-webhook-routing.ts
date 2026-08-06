@@ -2,8 +2,8 @@ import crypto from 'node:crypto';
 
 import get from 'lodash-es/get.js';
 
-import { NangoError, accountService, connectionService, getProvider } from '@nangohq/shared';
-import { Err, Ok, getLogger } from '@nangohq/utils';
+import { accountService, connectionService, getProvider, NangoError } from '@nangohq/shared';
+import { Err, getLogger, Ok } from '@nangohq/utils';
 
 import { connectionCreated as connectionCreatedHook } from '../hooks/hooks.js';
 
@@ -135,7 +135,8 @@ async function handleCreateWebhook(nango: InternalNango, body: any): Promise<Res
             provider as ProviderGithubApp,
             connectionConfig,
             logCtx,
-            connCreatedHook
+            connCreatedHook,
+            connection.tags
         );
         await logCtx.success();
 

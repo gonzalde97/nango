@@ -2,7 +2,7 @@ import { NangoActionBase } from './action.js';
 import { validateData } from './dataValidation.js';
 
 import type { ValidateDataError } from './dataValidation.js';
-import type { RawModel, ZodMetadata, ZodModel } from './types.js';
+import type { RawModel, ZodCheckpoint, ZodMetadata, ZodModel } from './types.js';
 import type { MaybePromise, NangoProps } from '@nangohq/types';
 import type * as z from 'zod';
 
@@ -11,12 +11,14 @@ export const BASE_VARIANT = 'base';
 export abstract class NangoSyncBase<
     TModels extends Record<string, ZodModel> = never,
     TMetadata extends ZodMetadata = never,
+    TCheckpoint extends ZodCheckpoint = never,
     TModelName extends keyof TModels = keyof TModels
-> extends NangoActionBase<TMetadata> {
+> extends NangoActionBase<TMetadata, TCheckpoint> {
     public variant = BASE_VARIANT;
 
     lastSyncDate?: Date;
     track_deletes = false;
+    emptyCache = false;
 
     constructor(config: NangoProps) {
         super(config);
@@ -27,6 +29,10 @@ export abstract class NangoSyncBase<
 
         if (config.track_deletes) {
             this.track_deletes = config.track_deletes;
+        }
+
+        if (config.emptyCache) {
+            this.emptyCache = config.emptyCache;
         }
 
         if (config.syncVariant) {
@@ -65,7 +71,29 @@ export abstract class NangoSyncBase<
         model: TModelName
     ): MaybePromise<Map<TKey, TModel>>;
 
+    public abstract listRecords<TModel extends RawModel = z.infer<TModels[TModelName]>>(
+        model: TModelName,
+        options?: {
+            cursor?: string;
+        }
+    ): AsyncGenerator<TModel>;
+
+    /**
+     * @deprecated please use trackDeletesStart and trackDeletesEnd
+     */
     public abstract deleteRecordsFromPreviousExecutions(model: TModelName): MaybePromise<{ deletedKeys: string[] }>;
+
+    /*
+     * Mark the start of a deletes tracking phase for a given model, if not already started.
+     * During this phase, the sync will keep track of all records that are not present anymore in the saved data.
+     */
+    public abstract trackDeletesStart(model: TModelName): MaybePromise<void>;
+
+    /*
+     * Mark the end of a deletes tracking phase for a given model
+     * All the records that are not present anymore in the saved data since the start of the tracking phase will be marked as deleted, and their keys will be returned.
+     */
+    public abstract trackDeletesEnd(model: TModelName): MaybePromise<{ deletedKeys: string[] }>;
 
     public abstract setMergingStrategy(merging: { strategy: 'ignore_if_modified_after' | 'override' }, model: TModelName): Promise<void>;
 

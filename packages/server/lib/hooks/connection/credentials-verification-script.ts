@@ -1,6 +1,6 @@
 import tracer from 'dd-trace';
 
-import { ProxyRequest, getProvider, getProxyConfiguration } from '@nangohq/shared';
+import { getProvider, getProxyConfiguration, getServerOutboundUrlPolicy, makeDataTransferEvent, ProxyRequest, pubsub } from '@nangohq/shared';
 
 import * as verificationscriptHandlers from './index.js';
 
@@ -10,6 +10,7 @@ import type {
     BasicApiCredentials,
     ConnectionConfig,
     DBConnectionDecrypted,
+    InstallPluginCredentials,
     InternalProxyConfiguration,
     JwtCredentials,
     SignatureCredentials,
@@ -32,9 +33,10 @@ export interface InternalNango {
 
 async function execute(
     config: Config,
-    credentials: ApiKeyCredentials | BasicApiCredentials | TbaCredentials | JwtCredentials | SignatureCredentials,
+    credentials: ApiKeyCredentials | BasicApiCredentials | TbaCredentials | JwtCredentials | SignatureCredentials | InstallPluginCredentials,
     connectionId: string,
-    connectionConfig: ConnectionConfig
+    connectionConfig: ConnectionConfig,
+    accountId: number
 ) {
     const { provider: providerName, unique_key: providerConfigKey } = config;
 
@@ -45,6 +47,7 @@ async function execute(
         connection_id: connectionId,
         credentials,
         connection_config: connectionConfig,
+        webhook_url_override: null,
         environment_id: config.environment_id,
         created_at: new Date(),
         updated_at: new Date(),
@@ -59,7 +62,8 @@ async function execute(
         last_refresh_failure: null,
         last_refresh_success: null,
         refresh_attempts: null,
-        refresh_exhausted: false
+        refresh_exhausted: false,
+        tags: {}
     };
 
     const activeSpan = tracer.scope().active();
@@ -105,13 +109,27 @@ async function execute(
                         // TODO: log something here?
                     },
                     proxyConfig,
+                    outboundPolicy: getServerOutboundUrlPolicy(),
                     getConnection: () => {
                         return connection;
                     },
                     getIntegrationConfig: () => ({
                         oauth_client_id: null,
                         oauth_client_secret: null
-                    })
+                    }),
+                    onBytes: (meteredBytes) => {
+                        void pubsub.publisher.publish(
+                            makeDataTransferEvent({
+                                pkg: 'server',
+                                callsite: 'credential_verification_hook',
+                                accountId,
+                                connectionId,
+                                integrationId: config.unique_key,
+                                environmentId: config.environment_id,
+                                meteredBytes
+                            })
+                        );
+                    }
                 });
                 return (await proxy.request()).unwrap();
             }

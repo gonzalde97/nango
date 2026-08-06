@@ -1,8 +1,18 @@
 import db from '@nangohq/database';
 import { envs, logContextGetter } from '@nangohq/logs';
-import { NangoError, accountService, configService, connectionService, errorManager, getProvider, githubAppClient } from '@nangohq/shared';
-import { flags } from '@nangohq/utils';
+import {
+    accountService,
+    configService,
+    connectionService,
+    errorManager,
+    generateSlackConnectionId,
+    getProvider,
+    githubAppClient,
+    NangoError
+} from '@nangohq/shared';
+import { flags, zodErrorToHTTP } from '@nangohq/utils';
 
+import { webhookUrlSchema } from '../helpers/validation.js';
 import { preConnectionDeletion } from '../hooks/connection/on/pre-connection-deletion.js';
 import {
     connectionCreated as connectionCreatedHook,
@@ -37,11 +47,12 @@ class ConnectionController {
                 return;
             }
 
-            const { environment, account: team } = res.locals;
+            const { environment, account } = res.locals;
             const connectionId = req.params['connectionId'] as string;
+            const expectedConnectionId = generateSlackConnectionId(account.uuid, environment.id);
 
-            if (!connectionId) {
-                errorManager.errRes(res, 'missing_connection_id');
+            if (connectionId !== expectedConnectionId) {
+                res.status(403).json({ error: { code: 'forbidden', message: 'You do not have permission to perform this action' } });
                 return;
             }
 
@@ -70,7 +81,7 @@ class ConnectionController {
 
             const preDeletionHook = () =>
                 preConnectionDeletion({
-                    team,
+                    team: account,
                     environment,
                     connection,
                     logContextGetter
@@ -170,6 +181,15 @@ class ConnectionController {
                 errorManager.errRes(res, 'missing_provider_config');
                 return;
             }
+
+            const webhookUrlValidation = webhookUrlSchema.safeParse(req.body['webhook_url_override']);
+            if (!webhookUrlValidation.success) {
+                res.status(400).send({ error: { code: 'invalid_body', errors: zodErrorToHTTP(webhookUrlValidation.error) } });
+                return;
+            }
+
+            // z.url() already trims; '' (no override) and undefined both normalize to null.
+            const webhookUrlOverride = webhookUrlValidation.data || null;
 
             const integration = await configService.getProviderConfig(provider_config_key, environment.id);
             if (!integration) {
@@ -280,6 +300,7 @@ class ConnectionController {
                     metadata,
                     environment,
                     connectionConfig,
+                    webhookUrlOverride,
                     parsedRawCredentials: oAuthCredentials,
                     connectionCreatedHook: connCreatedHook
                 });
@@ -343,6 +364,7 @@ class ConnectionController {
                     metadata,
                     environment,
                     connectionConfig,
+                    webhookUrlOverride,
                     parsedRawCredentials: oAuthCredentials,
                     connectionCreatedHook: connCreatedHook
                 });
@@ -392,6 +414,7 @@ class ConnectionController {
                     metadata,
                     environment,
                     connectionConfig: { ...connection_config },
+                    webhookUrlOverride,
                     parsedRawCredentials: oAuthCredentials,
                     connectionCreatedHook: connCreatedHook
                 });
@@ -435,6 +458,7 @@ class ConnectionController {
                     environment,
                     credentials,
                     connectionConfig: { ...connection_config },
+                    webhookUrlOverride,
                     connectionCreatedHook: connCreatedHook
                 });
 
@@ -476,6 +500,7 @@ class ConnectionController {
                     metadata,
                     environment,
                     connectionConfig: { ...connection_config },
+                    webhookUrlOverride,
                     credentials,
                     connectionCreatedHook: connCreatedHook
                 });
@@ -523,6 +548,7 @@ class ConnectionController {
                     providerConfigKey: provider_config_key,
                     parsedRawCredentials: credentialsRes.value,
                     connectionConfig,
+                    webhookUrlOverride,
                     environmentId: environment.id,
                     metadata
                 });
@@ -573,6 +599,7 @@ class ConnectionController {
                         oauth_client_id: config.oauth_client_id,
                         oauth_client_secret: config.oauth_client_secret
                     },
+                    webhookUrlOverride,
                     metadata,
                     config,
                     environment
@@ -588,7 +615,8 @@ class ConnectionController {
                     providerConfigKey: provider_config_key,
                     environment,
                     metadata,
-                    connectionConfig: { ...connection_config }
+                    connectionConfig: { ...connection_config },
+                    webhookUrlOverride
                 });
 
                 if (imported) {

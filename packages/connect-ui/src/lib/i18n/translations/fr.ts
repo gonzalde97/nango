@@ -2,6 +2,7 @@ import type { Translation } from './en';
 
 const fr: Translation = {
     common: {
+        dialogLabel: 'Connecter une intégration',
         close: 'Fermer',
         loading: 'Chargement',
         back: 'Retour',
@@ -23,10 +24,14 @@ const fr: Translation = {
     },
     go: {
         linkAccount: 'Lier le compte {provider}',
+        fieldDocumentation: 'Voir la documentation pour {field}',
         connect: 'Connecter',
         success: 'Succès !',
         successMessage: 'Vous avez configuré avec succès votre intégration {provider}.',
-        connectionFailed: 'Échec de la connexion',
+        connectionFailed: 'Connexion échouée',
+        connectionErrorGeneric: "Une erreur s'est produite lors de l'autorisation. Veuillez contacter notre équipe support.",
+        showErrorDetails: "Afficher les détails de l'erreur",
+        hideErrorDetails: "Masquer les détails de l'erreur",
         tryAgain: 'Veuillez réessayer',
         backToList: 'Retour à la liste des intégrations',
         willConnect: 'Nous allons vous connecter à {provider}',
@@ -34,6 +39,7 @@ const fr: Translation = {
         popupBlocked: "La fenêtre d'authentification a été bloquée par votre navigateur, veuillez autoriser les pop-ups",
         popupClosed: "La fenêtre d'authentification a été fermée avant la fin du processus, veuillez réessayer",
         closeTab: 'Vous pouvez maintenant fermer cet onglet.',
+        authorizationFailed: "Échec de l'autorisation.",
         invalidCredentials: "{provider} n'a pas validé vos identifiants. Veuillez vérifier les valeurs et réessayer.",
         resourceCapped: "Vous avez atteint le nombre maximum de connexions autorisées. Veuillez contacter l'administrateur.",
         invalidPreconfigured: "Un champ préconfiguré par l'administrateur n'est pas valide, veuillez contacter le support"

@@ -1,3 +1,4 @@
+import { getProviderScopes } from '@nangohq/providers';
 import { getProviders, sharedCredentialsService } from '@nangohq/shared';
 import { report, requireEmptyQuery, zodErrorToHTTP } from '@nangohq/utils';
 
@@ -21,17 +22,16 @@ export const getProvidersList = asyncWrapper<GetProviders>(async (req, res) => {
 
     try {
         const sharedCredentials = await sharedCredentialsService.getPreConfiguredProviderScopes();
+        const allScopes = getProviderScopes();
 
-        const list = Object.entries(providers)
-            .filter(([, properties]) => properties.auth_mode !== 'MCP_OAUTH2')
-            .map(([provider, properties]) => {
-                // check if provider has nango's preconfigured credentials
-                const preConfiguredInfo = sharedCredentials.isOk() ? sharedCredentials.value[provider] : undefined;
-                const isPreConfigured = preConfiguredInfo ? preConfiguredInfo.preConfigured : false;
-                const preConfiguredScopes = preConfiguredInfo ? preConfiguredInfo.scopes : [];
+        const list = Object.entries(providers).map(([provider, properties]) => {
+            // check if provider has nango's preconfigured credentials
+            const preConfiguredInfo = sharedCredentials.isOk() ? sharedCredentials.value[provider] : undefined;
+            const isPreConfigured = preConfiguredInfo ? preConfiguredInfo.preConfigured : false;
+            const preConfiguredScopes = preConfiguredInfo ? preConfiguredInfo.scopes : [];
 
-                return providerListItemToAPI(provider, properties, isPreConfigured, preConfiguredScopes);
-            });
+            return providerListItemToAPI(provider, properties, isPreConfigured, preConfiguredScopes, allScopes?.[provider]);
+        });
         const sortedList = list.sort((a, b) => a.name.localeCompare(b.name));
         res.status(200).send({ data: sortedList });
     } catch (err) {

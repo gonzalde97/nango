@@ -5,6 +5,7 @@ import { zodErrorToHTTP } from '@nangohq/utils';
 
 import { integrationToPublicApi } from '../../../formatters/integration.js';
 import { providerConfigKeySchema } from '../../../helpers/validation.js';
+import { hasScope } from '../../../middleware/scope.middleware.js';
 import { asyncWrapper } from '../../../utils/asyncWrapper.js';
 
 import type { ApiPublicIntegrationInclude, GetPublicIntegration } from '@nangohq/types';
@@ -63,9 +64,14 @@ export const getPublicIntegration = asyncWrapper<GetPublicIntegration>(async (re
 
     const include: ApiPublicIntegrationInclude = {};
     if (queryInclude.has('webhook')) {
-        include.webhook_url = provider.webhook_routing_script ? `${getGlobalWebhookReceiveUrl()}/${environment.uuid}/${integration.provider}` : null;
+        include.webhook_url = provider.webhook_routing_script
+            ? `${getGlobalWebhookReceiveUrl()}/${environment.uuid}/${encodeURIComponent(integration.unique_key)}`
+            : null;
     }
-    if (queryInclude.has('credentials')) {
+    if (
+        queryInclude.has('credentials') &&
+        hasScope({ grantedScopes: res.locals['apiKeyScopes'] as string[] | undefined, requiredScope: 'environment:integrations:read_credentials' })
+    ) {
         if (provider.auth_mode === 'OAUTH1' || provider.auth_mode === 'OAUTH2' || provider.auth_mode === 'TBA') {
             include.credentials = {
                 type: provider.auth_mode,
@@ -77,9 +83,19 @@ export const getPublicIntegration = asyncWrapper<GetPublicIntegration>(async (re
         } else if (provider.auth_mode === 'APP') {
             include.credentials = {
                 type: provider.auth_mode,
-                app_id: integration.oauth_client_id,
-                private_key: integration.oauth_client_secret,
+                app_id: integration.shared_credentials_id ? '' : integration.oauth_client_id,
+                private_key: integration.shared_credentials_id ? '' : integration.oauth_client_secret,
                 app_link: integration.app_link || null
+            };
+        } else if (provider.auth_mode === 'CUSTOM') {
+            const rawPrivateKey = integration.custom?.['private_key'];
+            include.credentials = {
+                type: provider.auth_mode,
+                client_id: integration.shared_credentials_id ? '' : integration.oauth_client_id,
+                client_secret: integration.shared_credentials_id ? '' : integration.oauth_client_secret,
+                app_id: integration.shared_credentials_id ? '' : integration.custom?.['app_id'] || null,
+                app_link: integration.app_link || null,
+                private_key: integration.shared_credentials_id ? '' : rawPrivateKey ? Buffer.from(rawPrivateKey, 'base64').toString('utf8') : null
             };
         } else {
             include.credentials = null;

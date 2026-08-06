@@ -1,9 +1,10 @@
 import db from '@nangohq/database';
-import { Err, Ok, nanoid } from '@nangohq/utils';
+import { Err, nanoid, Ok } from '@nangohq/utils';
 
+import { getEncryptionManager } from '../utils/encryption.manager.js';
 import configService from './config.service.js';
-import encryptionManager from '../utils/encryption.manager.js';
 
+import type { Knex } from '@nangohq/database';
 import type {
     DBSharedCredentials,
     IntegrationConfig,
@@ -14,7 +15,27 @@ import type {
     SharedCredentialsInputDto
 } from '@nangohq/types';
 
+async function getLatestSharedCredentialsRecordByName({
+    name,
+    trx = db.knex
+}: {
+    name: string;
+    trx?: Knex.Transaction | Knex;
+}): Promise<DBSharedCredentials | undefined> {
+    return await trx.select('*').from<DBSharedCredentials>('providers_shared_credentials').where('name', name).orderBy('created_at', 'desc').first();
+}
+
 class SharedCredentialsService {
+    async getLatestSharedCredentialsByName(name: string): Promise<Result<DBSharedCredentials | null>> {
+        try {
+            const sharedCredentials = await getLatestSharedCredentialsRecordByName({ name });
+
+            return Ok(sharedCredentials ?? null);
+        } catch (err) {
+            return Err(new Error('failed_to_get_shared_credentials_by_name', { cause: err }));
+        }
+    }
+
     async createPreprovisionedProvider({
         providerName,
         environment_id,
@@ -32,11 +53,10 @@ class SharedCredentialsService {
     }): Promise<Result<IntegrationConfig>> {
         try {
             const config = await db.knex.transaction(async (trx) => {
-                const sharedCredentials = await trx
-                    .select('*')
-                    .from<DBSharedCredentials>('providers_shared_credentials')
-                    .where('name', shared_credentials_name ?? providerName)
-                    .first();
+                const sharedCredentials = await getLatestSharedCredentialsRecordByName({
+                    name: shared_credentials_name ?? providerName,
+                    trx
+                });
 
                 if (!sharedCredentials) {
                     throw new Error('shared_credentials_not_found');
@@ -104,7 +124,7 @@ class SharedCredentialsService {
             let decryptedClientSecret = credentials.oauth_client_secret;
 
             if (credentials.oauth_client_secret_iv && credentials.oauth_client_secret_tag) {
-                decryptedClientSecret = encryptionManager.decryptSync(
+                decryptedClientSecret = getEncryptionManager().decryptSync(
                     credentials.oauth_client_secret,
                     credentials.oauth_client_secret_iv,
                     credentials.oauth_client_secret_tag
@@ -130,7 +150,7 @@ class SharedCredentialsService {
             oauth_scopes: config.scopes || ''
         };
 
-        const [encryptedClientSecret, iv, authTag] = encryptionManager.encryptSync(configForEncryption.oauth_client_secret);
+        const [encryptedClientSecret, iv, authTag] = getEncryptionManager().encryptSync(configForEncryption.oauth_client_secret);
 
         const configToInsert: SharedCredentials = {
             ...configForEncryption,
@@ -147,8 +167,6 @@ class SharedCredentialsService {
                     credentials: configToInsert
                 })
                 .into<DBSharedCredentials>('providers_shared_credentials')
-                .onConflict('name')
-                .ignore()
                 .returning('*');
         } catch (err) {
             return Err(new Error('failed_to_create_shared_credentials', { cause: err }));
@@ -171,7 +189,7 @@ class SharedCredentialsService {
                 oauth_scopes: config.scopes ?? ''
             };
 
-            const [encryptedClientSecret, iv, authTag] = encryptionManager.encryptSync(configForEncryption.oauth_client_secret);
+            const [encryptedClientSecret, iv, authTag] = getEncryptionManager().encryptSync(configForEncryption.oauth_client_secret);
 
             const configToUpdate: SharedCredentials = {
                 ...configForEncryption,
@@ -231,7 +249,7 @@ class SharedCredentialsService {
                 let decryptedClientSecret = credentials.oauth_client_secret;
 
                 if (credentials.oauth_client_secret_iv && credentials.oauth_client_secret_tag) {
-                    decryptedClientSecret = encryptionManager.decryptSync(
+                    decryptedClientSecret = getEncryptionManager().decryptSync(
                         credentials.oauth_client_secret,
                         credentials.oauth_client_secret_iv,
                         credentials.oauth_client_secret_tag

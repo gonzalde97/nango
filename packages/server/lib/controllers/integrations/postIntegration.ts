@@ -1,6 +1,6 @@
 import * as z from 'zod';
 
-import { configService, getProvider } from '@nangohq/shared';
+import { configService, getProvider, sharedCredentialsService } from '@nangohq/shared';
 import { requireEmptyQuery, zodErrorToHTTP } from '@nangohq/utils';
 
 import { integrationToPublicApi } from '../../formatters/integration.js';
@@ -12,18 +12,26 @@ import {
     providerSchema
 } from '../../helpers/validation.js';
 import { asyncWrapper } from '../../utils/asyncWrapper.js';
+import { resolveIntegrationConfig } from '../v1/integrations/integrationConfig.js';
 
-import type { DBCreateIntegration, PostPublicIntegration } from '@nangohq/types';
+import type { DBCreateIntegration, PostPublicIntegration, PostPublicQuickstartIntegration } from '@nangohq/types';
 
-const validationBody = z
+const baseValidationBody = z
     .object({
         provider: providerSchema,
         unique_key: providerConfigKeySchema,
         display_name: integrationDisplayNameSchema.optional(),
-        credentials: integrationCredentialsSchema.optional(),
         forward_webhooks: integrationForwardWebhooksSchema
     })
     .strict();
+
+const validationBody = baseValidationBody.extend({
+    credentials: integrationCredentialsSchema.optional(),
+    integration_config: z.record(z.string(), z.string().max(8192)).optional(),
+    custom: z.record(z.string(), z.string()).optional()
+});
+
+const quickstartAuthModes = new Set(['OAUTH1', 'OAUTH2']);
 
 export const postPublicIntegration = asyncWrapper<PostPublicIntegration>(async (req, res) => {
     const emptyQuery = requireEmptyQuery(req);
@@ -114,6 +122,98 @@ export const postPublicIntegration = asyncWrapper<PostPublicIntegration>(async (
             }
         }
     }
+
+    if (body.integration_config && Object.keys(body.integration_config).length > 0) {
+        const cfg = resolveIntegrationConfig(provider, body.integration_config);
+        if (cfg.isErr()) {
+            res.status(400).send({ error: { code: 'invalid_body', message: cfg.error.message } });
+            return;
+        }
+        newIntegration.custom = { ...newIntegration.custom, ...cfg.value };
+    }
+
+    // Free-form custom values, for providers without an `integration_config` schema. Schema providers must use
+    // `integration_config` (validated) so this path can't write a config the form/v1 API would reject.
+    if (body.custom && Object.keys(body.custom).length > 0) {
+        if (provider.integration_config) {
+            res.status(400).send({ error: { code: 'invalid_body', message: 'This provider uses integration_config; set its values there instead of custom' } });
+            return;
+        }
+        newIntegration.custom = { ...newIntegration.custom, ...body.custom };
+    }
+
+    const result = await configService.createProviderConfig(newIntegration, provider);
+    if (!result) {
+        res.status(500).send({ error: { code: 'server_error', message: 'Failed to create integration' } });
+        return;
+    }
+
+    res.status(200).send({
+        data: integrationToPublicApi({ integration: result, provider })
+    });
+});
+
+export const postPublicQuickstartIntegration = asyncWrapper<PostPublicQuickstartIntegration>(async (req, res) => {
+    const emptyQuery = requireEmptyQuery(req);
+    if (emptyQuery) {
+        res.status(400).send({ error: { code: 'invalid_query_params', errors: zodErrorToHTTP(emptyQuery.error) } });
+        return;
+    }
+
+    const valBody = baseValidationBody.safeParse(req.body);
+    if (!valBody.success) {
+        res.status(400).send({ error: { code: 'invalid_body', errors: zodErrorToHTTP(valBody.error) } });
+        return;
+    }
+
+    const { environment } = res.locals;
+    const body: PostPublicQuickstartIntegration['Body'] = valBody.data;
+    const provider = getProvider(body.provider);
+    if (!provider) {
+        res.status(400).send({
+            error: { code: 'invalid_body', errors: [{ code: 'invalid_string', message: 'Invalid provider', path: ['provider'] }] }
+        });
+        return;
+    }
+
+    if (!quickstartAuthModes.has(provider.auth_mode)) {
+        res.status(400).send({
+            error: { code: 'invalid_body', message: 'Quickstart is only available for providers that require a developer app' }
+        });
+        return;
+    }
+
+    const exists = await configService.getProviderConfig(body.unique_key, environment.id);
+    if (exists) {
+        res.status(400).send({
+            error: { code: 'invalid_body', errors: [{ code: 'invalid_string', message: 'Unique key already exists', path: ['uniqueKey'] }] }
+        });
+        return;
+    }
+
+    const sharedCredentials = await sharedCredentialsService.getLatestSharedCredentialsByName(body.provider);
+    if (sharedCredentials.isErr()) {
+        res.status(500).send({ error: { code: 'server_error', message: 'Failed to load Nango-provided developer app' } });
+        return;
+    }
+
+    if (!sharedCredentials.value) {
+        res.status(400).send({
+            error: { code: 'invalid_body', message: 'No Nango-provided developer app is configured for this provider' }
+        });
+        return;
+    }
+
+    const newIntegration: DBCreateIntegration = {
+        environment_id: environment.id,
+        provider: body.provider,
+        display_name: body.display_name || null,
+        unique_key: body.unique_key,
+        custom: null,
+        missing_fields: [],
+        forward_webhooks: body.forward_webhooks ?? true,
+        shared_credentials_id: sharedCredentials.value.id
+    };
 
     const result = await configService.createProviderConfig(newIntegration, provider);
     if (!result) {

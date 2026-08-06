@@ -6,7 +6,8 @@ export const DEFAULT_EXPIRES_AT_MS = ms('1day');
 export const DEFAULT_OAUTHCC_EXPIRES_AT_MS = ms('55minutes'); // This ensures we have an expiresAt value
 export const DEFAULT_INFINITE_EXPIRES_AT_MS = ms('99years');
 export const MAX_CONSECUTIVE_DAYS_FAILED_REFRESH = 4;
-export const REFRESH_MARGIN_S = ms('15minutes') / 1000;
+export const REFRESH_FAILURE_COOLDOWN_MS = ms('30seconds');
+export const REFRESH_MARGIN_MS = ms('15minutes');
 
 export function getExpiresAtFromCredentials(credentials: AllAuthCredentials): Date | null {
     if (credentials.type === 'CUSTOM' && 'app' in credentials) {
@@ -23,7 +24,7 @@ export function getExpiresAtFromCredentials(credentials: AllAuthCredentials): Da
         return credentials['expires_at'];
     }
 
-    if (credentials.type === 'OAUTH1' || credentials.type === 'APP_STORE' || !credentials.type) {
+    if (credentials.type === 'OAUTH1' || !credentials.type) {
         return new Date(Date.now() + DEFAULT_INFINITE_EXPIRES_AT_MS);
     }
 

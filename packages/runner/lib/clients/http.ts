@@ -1,45 +1,85 @@
-import { retryWithBackoff } from '@nangohq/utils';
+import { networkError, retryWithBackoff, stringifyError, withInternalTls } from '@nangohq/utils';
 
 import { logger } from '../logger.js';
 
-export async function httpFetch(
-    url: string | URL,
-    init?: RequestInit,
-    backoffOptions?: {
-        startingDelay?: number;
-        timeMultiple?: number;
-        numOfAttempts?: number;
-    }
-): Promise<Response> {
-    try {
-        const response = await retryWithBackoff(async () => {
-            let res: Response;
+function getErrorCode(error: unknown): string | undefined {
+    if (typeof error !== 'object' || error === null) return undefined;
+    if ('code' in error && typeof (error as any).code === 'string') return (error as any).code;
+    if ('cause' in error) return getErrorCode((error as any).cause);
+    return undefined;
+}
 
+function shouldRetry(error: unknown, response?: Response): boolean {
+    const code = getErrorCode(error);
+    if (code && networkError.includes(code)) {
+        return true;
+    }
+
+    if (response) {
+        if (response.status >= 500 || response.status === 429) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+export interface HttpFetchOptions extends RequestInit {
+    userAgent?: string;
+}
+
+export interface BackoffOptions {
+    startingDelay?: number;
+    timeMultiple?: number;
+    numOfAttempts?: number;
+}
+
+export async function httpFetch(url: string | URL, options?: HttpFetchOptions, backoffOptions?: BackoffOptions): Promise<Response> {
+    const { userAgent, ...requestInit } = options ?? {};
+
+    const method = requestInit.method || 'GET';
+
+    const headers = new Headers(requestInit.headers);
+    if (userAgent) {
+        headers.set('User-Agent', userAgent);
+    }
+
+    const fetchOptions: RequestInit = withInternalTls({
+        ...requestInit,
+        headers
+    });
+
+    try {
+        return await retryWithBackoff(async () => {
+            let res: Response;
             try {
-                res = await fetch(url, init);
+                res = await fetch(url, fetchOptions);
             } catch (err) {
-                logger.error(`Network error: ${init?.method || 'GET'} ${url.toString()} -> ${(err as Error).message}`);
-                // Retry on network errors
-                throw err;
+                if (shouldRetry(err)) {
+                    throw err;
+                }
+
+                // Non-retryable network error
+                return new Response(JSON.stringify({ error: stringifyError(err, { cause: true }) }), {
+                    status: 502,
+                    headers: { 'Content-Type': 'application/json' }
+                });
             }
 
             if (!res.ok) {
-                logger.error(`${init?.method || 'GET'} ${url.toString()} -> ${res.status} ${res.statusText}`);
+                logger.error(`${method} ${url.toString()} -> ${res.status} ${res.statusText}`);
             }
 
-            // Retry only on 5xx or 429 responses
-            if (res.status >= 500 || res.status === 429) {
-                throw new Error(`${init?.method || 'GET'} ${url.toString()} -> ${res.status} ${res.statusText}`);
+            if (shouldRetry(null, res)) {
+                throw new Error(`${method} ${url.toString()} -> ${res.status} ${res.statusText}`);
             }
 
             return res;
         }, backoffOptions);
-
-        return response;
     } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return new Response(JSON.stringify({ error: message }), {
-            status: 599,
+        // All retries exhausted
+        return new Response(JSON.stringify({ error: stringifyError(err, { cause: true }) }), {
+            status: 502,
             headers: { 'Content-Type': 'application/json' }
         });
     }

@@ -1,56 +1,84 @@
+import { createHash } from 'node:crypto';
 import { Readable } from 'stream';
 
-import { CopyObjectCommand, DeleteObjectsCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { CopyObjectCommand, DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import archiver from 'archiver';
 
 import { nangoConfigFile } from '@nangohq/nango-yaml';
-import { isCloud, isEnterprise, isLocal, isTest, report } from '@nangohq/utils';
+import { isCloud, isEnterprise, isLocal, isTest, report, useS3 } from '@nangohq/utils';
 
-import localFileService from './local.service.js';
 import { NangoError } from '../../utils/error.js';
 import errorManager from '../../utils/error.manager.js';
+import localFileService from './local.service.js';
 
 import type { ServiceResponse } from '../../models/Generic.js';
-import type { GetObjectCommandOutput } from '@aws-sdk/client-s3';
+import type { GetObjectCommandOutput, S3ClientConfig } from '@aws-sdk/client-s3';
 import type { DBSyncConfig } from '@nangohq/types';
 import type { Response } from 'express';
+
+function getCredentials() {
+    const accessKeyId = process.env['AWS_INTEGRATIONS_ACCESS_KEY_ID'] || process.env['AWS_ACCESS_KEY_ID'];
+    const secretAccessKey = process.env['AWS_INTEGRATIONS_SECRET_ACCESS_KEY'] || process.env['AWS_SECRET_ACCESS_KEY'];
+    if (!accessKeyId || !secretAccessKey) {
+        return undefined;
+    }
+    return {
+        accessKeyId,
+        secretAccessKey
+    };
+}
+
+function getRegion() {
+    return process.env['AWS_INTEGRATIONS_REGION'] || process.env['AWS_REGION'] || 'us-west-2';
+}
+
+function getBucketName() {
+    return process.env['AWS_INTEGRATIONS_BUCKET_NAME'] || process.env['AWS_BUCKET_NAME'] || 'nangodev-customer-integrations';
+}
+
+function contentMd5(content: string): string {
+    return createHash('md5').update(content, 'utf8').digest('hex');
+}
+
+function etagMatchesContent(etag: string | undefined, content: string): boolean {
+    if (!etag) {
+        return false;
+    }
+    return etag.replace(/"/g, '') === contentMd5(content);
+}
 
 class RemoteFileService {
     private client: S3Client;
     private useS3: boolean;
 
-    bucket = (process.env['AWS_BUCKET_NAME'] as string) || 'nangodev-customer-integrations';
+    bucket = getBucketName();
     publicRoute = 'integration-templates';
     publicZeroYamlRoute = 'templates-zero';
 
     constructor() {
-        const region = process.env['AWS_REGION'] ?? 'us-west-2';
+        const region = getRegion();
         if (isEnterprise) {
-            this.useS3 = Boolean(process.env['AWS_REGION'] && process.env['AWS_BUCKET_NAME']);
+            this.useS3 = useS3;
         } else {
             this.useS3 = !isLocal && !isTest;
         }
-
-        this.client = new S3Client({
-            region
-        });
+        const credentials = getCredentials();
+        const config: S3ClientConfig = credentials ? { region, credentials } : { region };
+        this.client = new S3Client(config);
     }
 
     async upload({
         content,
         destinationPath,
-        destinationLocalPath
+        destinationLocalFileName
     }: {
         content: string;
         destinationPath: string;
-        destinationLocalPath: string;
+        destinationLocalFileName: string;
     }): Promise<string | null> {
-        if (isEnterprise && !this.useS3) {
-            localFileService.putIntegrationFile({ filePath: destinationLocalPath, fileContent: content });
-
-            return '_LOCAL_FILE_';
-        }
         if (!this.useS3) {
+            localFileService.putIntegrationFile({ fileName: destinationLocalFileName, fileContent: content });
+
             return '_LOCAL_FILE_';
         }
 
@@ -71,6 +99,19 @@ class RemoteFileService {
         }
     }
 
+    async checkIfChanged({ content, objectKey }: { content: string; objectKey: string }): Promise<boolean> {
+        if (!this.useS3) {
+            return true;
+        }
+
+        try {
+            const head = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: objectKey }));
+            return !etagMatchesContent(head.ETag, content);
+        } catch {
+            return true;
+        }
+    }
+
     /**
      * Copy
      * @desc copy an existing public integration file to user's location in s3,
@@ -79,21 +120,19 @@ class RemoteFileService {
     async copy({
         sourcePath,
         destinationPath,
-        destinationLocalPath,
-        isZeroYaml
+        destinationLocalFileName
     }: {
         sourcePath: string;
         destinationPath: string;
-        isZeroYaml: boolean;
         /**
          * sic
          * Destination when not uploading to S3
          * This method handles when S3 is not enabled (like locally)
          * TODO: We probably need to do it outside but until now it's like this
          */
-        destinationLocalPath: string;
+        destinationLocalFileName: string;
     }): Promise<string | null> {
-        const s3FilePath = `${isZeroYaml ? this.publicZeroYamlRoute : this.publicRoute}/${sourcePath}`;
+        const s3FilePath = `${this.publicZeroYamlRoute}/${sourcePath}`;
         try {
             if (isCloud) {
                 await this.client.send(
@@ -108,7 +147,7 @@ class RemoteFileService {
             } else {
                 const fileContent = await this.getFile(s3FilePath);
                 if (fileContent) {
-                    localFileService.putIntegrationFile({ filePath: destinationLocalPath, fileContent });
+                    localFileService.putIntegrationFile({ fileName: destinationLocalFileName, fileContent });
                 }
                 return '_LOCAL_FILE_';
             }
@@ -117,10 +156,6 @@ class RemoteFileService {
 
             return null;
         }
-    }
-
-    async getPublicTemplateJsonSchemaFile(integrationName: string): Promise<string | null> {
-        return await this.getFile(`${this.publicRoute}/${integrationName}/.nango/schema.json`);
     }
 
     getFile(fileName: string): Promise<string> {
@@ -220,19 +255,9 @@ class RemoteFileService {
         await this.zipAndSend({ res, files });
     }
 
-    async zipAndSendFiles({
-        res,
-        scriptName,
-        providerConfigKey,
-        syncConfig
-    }: {
-        res: Response;
-        scriptName: string;
-        providerConfigKey: string;
-        syncConfig: DBSyncConfig;
-    }): Promise<void> {
+    async zipAndSendFlow({ res, syncConfig, providerConfigKey }: { res: Response; syncConfig: DBSyncConfig; providerConfigKey: string }): Promise<void> {
         if (!isCloud && !this.useS3) {
-            return localFileService.zipAndSendFiles({ res, scriptName, providerConfigKey, syncConfig });
+            return localFileService.zipAndSendFlow({ res, syncConfig, providerConfigKey });
         } else {
             const files: { name: string; content: Readable }[] = [];
             if (!syncConfig.sdk_version?.includes('-zero')) {
@@ -245,8 +270,18 @@ class RemoteFileService {
                 files.push({ name: 'nango.yaml', content: resGet.response });
             }
 
-            const integrationFileLocation = syncConfig.file_location.split('/').slice(0, -1).join('/');
-            const { success: tsSuccess, error: tsError, response: tsFile } = await this.getStream(`${integrationFileLocation}/${scriptName}.ts`);
+            const scriptName = syncConfig.sync_name;
+
+            const jsFileLocation = syncConfig.file_location;
+            const { success: jsSuccess, error: jsError, response: jsFile } = await this.getStream(jsFileLocation);
+            if (!jsSuccess || jsFile === null) {
+                errorManager.errResFromNangoErr(res, jsError);
+                return;
+            }
+            files.push({ name: `${scriptName}.js`, content: jsFile });
+
+            const tsFileLocation = syncConfig.file_location.split('/').slice(0, -1).join('/');
+            const { success: tsSuccess, error: tsError, response: tsFile } = await this.getStream(`${tsFileLocation}/${scriptName}.ts`);
             if (!tsSuccess || tsFile === null) {
                 errorManager.errResFromNangoErr(res, tsError);
                 return;

@@ -103,6 +103,11 @@ export class NangoError extends NangoInternalError {
                 this.message = 'Authentication failed. The user could not be found.';
                 break;
 
+            case 'user_suspended':
+                this.status = 400;
+                this.message = 'User account is suspended.';
+                break;
+
             case 'missing_body':
                 this.status = 400;
                 this.message = 'Missing request body.';
@@ -168,6 +173,51 @@ export class NangoError extends NangoInternalError {
                 this.message = `Invalid HMAC signature.`;
                 break;
 
+            case 'missing_aws_sigv4_config':
+                this.status = 400;
+                this.message = `AWS SigV4 integration configuration is missing.`;
+                break;
+
+            case 'invalid_aws_sigv4_config':
+                this.status = 400;
+                this.message = `AWS SigV4 integration configuration is invalid.`;
+                break;
+
+            case 'missing_aws_sigv4_service':
+                this.status = 400;
+                this.message = `AWS SigV4 integration is missing the target AWS service.`;
+                break;
+
+            case 'missing_aws_sigv4_sts_endpoint':
+                this.status = 400;
+                this.message = `AWS SigV4 integration is missing the STS endpoint configuration.`;
+                break;
+
+            case 'missing_aws_sigv4_builtin_credentials':
+                this.status = 400;
+                this.message = `AWS SigV4 built-in mode requires AWS Access Key ID and Secret Access Key.`;
+                break;
+
+            case 'missing_aws_sigv4_region':
+                this.status = 400;
+                this.message = `AWS SigV4 requests require a region.`;
+                break;
+
+            case 'missing_aws_sigv4_role_arn':
+                this.status = 400;
+                this.message = `AWS SigV4 credentials are missing the IAM role ARN.`;
+                break;
+
+            case 'missing_aws_sigv4_external_id':
+                this.status = 400;
+                this.message = `AWS SigV4 credentials are missing the external ID.`;
+                break;
+
+            case 'aws_sigv4_sts_request_failed':
+                this.status = 502;
+                this.message = `Failed to retrieve AWS credentials from the configured STS endpoint.`;
+                break;
+
             case 'missing_provider_config':
                 this.status = 400;
                 this.message = `Missing param 'provider_config_key'.`;
@@ -231,6 +281,11 @@ export class NangoError extends NangoInternalError {
                 this.message = `Missing param 'app_secret'.`;
                 break;
 
+            case 'missing_walmart_seller_id':
+                this.status = 400;
+                this.message = `Missing connection config param 'sellerId' required for Walmart OAuth.`;
+                break;
+
             case 'missing_connection':
                 this.status = 400;
                 this.message = `Missing param 'connection_id'.`;
@@ -269,6 +324,38 @@ export class NangoError extends NangoInternalError {
                 }
                 break;
 
+            case 'attio_mcp_token_request_error':
+                this.status = 400;
+                this.message = `The Attio MCP API returned an error when trying to request an access token. Please try again later.`;
+                if (this.payload) {
+                    this.message += ` Error: ${typeof this.payload === 'string' ? this.payload : JSON.stringify(this.payload)}`;
+                }
+                break;
+
+            case 'attio_mcp_refresh_token_request_error':
+                this.status = 400;
+                this.message = `The Attio MCP API returned an error when trying to refresh the access token. Please try again later.`;
+                if (this.payload) {
+                    this.message += ` Error: ${typeof this.payload === 'string' ? this.payload : JSON.stringify(this.payload)}`;
+                }
+                break;
+
+            case 'slack_token_request_error':
+                this.status = 400;
+                this.message = `The Slack API returned an error when trying to request for an access token. Please try again later.`;
+                if (this.payload) {
+                    this.message += ` Error: ${typeof this.payload === 'string' ? this.payload : JSON.stringify(this.payload)}`;
+                }
+                break;
+
+            case 'slack_refresh_token_request_error':
+                this.status = 400;
+                this.message = `The Slack API returned an error when trying to refresh the access token. Please try again later.`;
+                if (this.payload) {
+                    this.message += ` Error: ${typeof this.payload === 'string' ? this.payload : JSON.stringify(this.payload)}`;
+                }
+                break;
+
             case 'refresh_token_external_error':
                 this.status = 400;
                 this.message = `The external API returned an error when trying to refresh the access token. Please try again later.`;
@@ -290,6 +377,11 @@ export class NangoError extends NangoInternalError {
             case 'connection_refresh_exhausted':
                 this.status = 424;
                 this.message = 'The refresh limit has been reached for this connection.';
+                break;
+
+            case 'connection_refresh_backoff':
+                this.status = 424;
+                this.message = 'A recent refresh attempt failed. Backing off before retrying.';
                 break;
 
             case 'connection_test_failed':
@@ -317,9 +409,19 @@ export class NangoError extends NangoInternalError {
                 this.message = `There is already a Provider Configuration matching the param 'provider_config_key'.`;
                 break;
 
+            case 'template_already_deployed':
+                this.status = 409;
+                this.message = 'This template is already deployed on the integration.';
+                break;
+
             case 'missing_required_fields_on_deploy':
                 this.status = 400;
                 this.message = 'Sync name, provider config key, the file, the models, and the runs fields are required to deploy a sync';
+                break;
+
+            case 'deploy_script_security_rejected':
+                this.status = 400;
+                this.message = 'The deployed script was rejected by a security policy.';
                 break;
 
             case 'file_upload_error':
@@ -514,9 +616,19 @@ export class NangoError extends NangoInternalError {
                 this.message = 'Missing webhook signature';
                 break;
 
+            case 'webhook_missing_token':
+                this.status = 401;
+                this.message = 'Missing webhook token';
+                break;
+
             case 'webhook_invalid_payload':
                 this.status = 400;
                 this.message = 'Invalid webhook payload';
+                break;
+
+            case 'webhook_missing_connection_id':
+                this.status = 400;
+                this.message = 'Webhook payload is missing nangoConnectionId';
                 break;
 
             case 'webhook_no_connection_or_existing_installation_id':
@@ -527,6 +639,51 @@ export class NangoError extends NangoInternalError {
             case 'webhook_unknown_provider':
                 this.status = 400;
                 this.message = 'Unknown provider';
+                break;
+
+            case 'no_default_api_secret':
+                this.status = status ?? 500;
+                this.message = 'Environment does not have a default API secret';
+                break;
+
+            case 'function_runtime_out_of_memory':
+                this.status = 500;
+                this.message = 'The function runtime ran out of memory';
+                break;
+
+            case 'function_runtime_timed_out':
+                this.status = 500;
+                this.message = 'The function runtime timed out';
+                break;
+
+            case 'function_runtime_other':
+                this.status = 500;
+                this.message = 'An unknown error occurred with the function runtime';
+                break;
+
+            case 'execution_timeout':
+                this.status = 500;
+                this.message = 'The function was killed because it exceeded the maximum execution time allowed without completing or saving a checkpoint';
+                break;
+
+            case 'followupboss_token_request_error':
+                this.status = 500;
+                this.message = 'Follow Up Boss token request failed.';
+                break;
+
+            case 'followupboss_refresh_token_request_error':
+                this.status = 500;
+                this.message = 'Follow Up Boss token refresh failed.';
+                break;
+
+            case 'client_credentials_fetch_error':
+                this.status = 400;
+                this.message = `Failed to fetch client credentials token: ${JSON.stringify(this.payload)}`;
+                break;
+
+            case 'microsoft_admin_token_request_error':
+                this.status = 400;
+                this.message = `Microsoft admin token request failed: ${JSON.stringify(this.payload)}`;
                 break;
 
             default:

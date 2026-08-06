@@ -1,9 +1,11 @@
 import type { OnEventType } from '../scripts/on-events/api.js';
+import type { Feature } from '../syncConfigs/db.js';
 import type { JSONSchema7 } from 'json-schema';
 
 export type HTTP_METHOD = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
+/** @deprecated **/
 export type SyncTypeLiteral = 'incremental' | 'full';
-export type ScriptFileType = 'actions' | 'syncs' | 'on-events' | 'post-connection-scripts'; // post-connection-scripts is deprecated
+export type ScriptFileType = 'actions' | 'syncs' | 'on-events' | 'functions' | 'webhooks' | 'post-connection-scripts'; // post-connection-scripts is deprecated
 export type ScriptTypeLiteral = 'action' | 'sync' | 'on-event';
 
 // --------------
@@ -88,6 +90,7 @@ export interface NangoYamlParsed {
     integrations: NangoYamlParsedIntegration[];
     models: Map<string, NangoModel>;
 }
+
 export interface NangoYamlParsedIntegration {
     providerConfigKey: string;
     syncs: ParsedNangoSync[];
@@ -98,11 +101,13 @@ export interface NangoYamlParsedIntegration {
      */
     postConnectionScripts?: string[];
 }
+
 export interface ParsedNangoSync {
     name: string;
     type: 'sync';
     endpoints: NangoSyncEndpointV2[];
     description: string;
+    /** @deprecated **/
     sync_type: SyncTypeLiteral;
     track_deletes: boolean;
     auto_start: boolean;
@@ -113,6 +118,9 @@ export interface ParsedNangoSync {
     usedModels: string[];
     webhookSubscriptions: string[];
     version: string;
+    // TODO: make non-optional when nango-yaml is fully removed
+    json_schema?: JSONSchema7 | undefined;
+    features?: Feature[] | undefined;
 }
 
 export interface ParsedNangoAction {
@@ -125,6 +133,9 @@ export interface ParsedNangoAction {
     scopes: string[];
     usedModels: string[];
     version: string;
+    // TODO: make non-optional when nango-yaml is fully removed
+    json_schema?: JSONSchema7 | undefined;
+    features?: Feature[] | undefined;
 }
 
 export type LayoutMode = 'root' | 'nested';
@@ -132,6 +143,7 @@ export type LayoutMode = 'root' | 'nested';
 // TODO: delete when fully replaced by json-schema
 export interface NangoModel {
     name: string;
+    description?: string | undefined;
     fields: NangoModelField[];
     isAnon?: boolean | undefined;
 }
@@ -140,6 +152,7 @@ export interface NangoModel {
 export interface NangoModelField {
     name: string;
     value: string | number | boolean | null | NangoModelField[];
+    description?: string | undefined;
     dynamic?: boolean | undefined;
     tsType?: boolean | undefined;
     model?: boolean | undefined;
@@ -162,5 +175,11 @@ export interface FlowsYaml {
 }
 
 // --- flows.zero.json is a parsed nango.yaml
-export type FlowZeroJson = NangoYamlParsedIntegration & { jsonSchema: JSONSchema7; sdkVersion: string };
+// TODO: drop the functions override once flows.zero.json is regenerated with `functions` (NAN-5943)
+export type FlowZeroJson = Omit<NangoYamlParsedIntegration, 'functions'> & {
+    jsonSchema?: JSONSchema7;
+    sdkVersion: string;
+    // Set when this integration symlinks to a canonical templates-repo folder (e.g. `quickbooks-sandbox` → `quickbooks`).
+    symLinkTargetName?: string;
+};
 export type FlowsZeroJson = FlowZeroJson[];

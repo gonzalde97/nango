@@ -4,22 +4,22 @@ import * as z from 'zod';
 
 import db from '@nangohq/database';
 import { acceptInvitation, accountService, getInvitation, pbkdf2, userService } from '@nangohq/shared';
-import { flagHasUsage, report, requireEmptyQuery, zodErrorToHTTP } from '@nangohq/utils';
+import { flagHasUsage, PBKDF2_ITERATIONS, report, requireEmptyQuery, zodErrorToHTTP } from '@nangohq/utils';
 
 import { envs } from '../../../env.js';
 import { sendVerificationEmail } from '../../../helpers/email.js';
 import { asyncWrapper } from '../../../utils/asyncWrapper.js';
 import { linkBillingCustomer, linkBillingFreeSubscription } from '../../../utils/billing.js';
 
-import type { DBTeam, PostSignup } from '@nangohq/types';
+import type { DBTeam, PostSignup, Role } from '@nangohq/types';
 
 export const passwordSchema = z
     .string()
-    .min(8)
+    .min(12)
     .max(64)
     .refine((value) => {
         return value.match(/[A-Z]+/) && value.match(/[0-9]/) && value.match(/[^a-zA-Z0-9]/);
-    }, 'Password should be least 8 characters with uppercase, a number and a special character');
+    }, 'Password should be least 12 characters with uppercase, a number and a special character');
 
 const validation = z
     .object({
@@ -69,6 +69,7 @@ export const signup = asyncWrapper<PostSignup>(async (req, res) => {
     }
 
     let account: DBTeam | null;
+    let invitationRole: Role = envs.DEFAULT_USER_ROLE;
     if (token) {
         // Invitation signup
         const validToken = await getInvitation(token);
@@ -83,6 +84,7 @@ export const signup = asyncWrapper<PostSignup>(async (req, res) => {
             return;
         }
 
+        invitationRole = validToken.role;
         await acceptInvitation(token);
     } else {
         if (!envs.AUTH_ALLOW_SIGNUP) {
@@ -102,14 +104,15 @@ export const signup = asyncWrapper<PostSignup>(async (req, res) => {
 
     // Create user
     const salt = crypto.randomBytes(16).toString('base64');
-    const hashedPassword = (await pbkdf2(password, salt, 310000, 32, 'sha256')).toString('base64');
+    const hashedPassword = (await pbkdf2(password, salt, PBKDF2_ITERATIONS, 32, 'sha256')).toString('base64');
     const user = await userService.createUser({
         email,
         name,
         hashed_password: hashedPassword,
         salt,
         account_id: account.id,
-        email_verified: token ? true : false
+        email_verified: token ? true : false,
+        role: token ? invitationRole : envs.DEFAULT_USER_ROLE
     });
     if (!user) {
         res.status(500).send({ error: { code: 'error_creating_user', message: 'There was a problem creating the user. Please reach out to support.' } });

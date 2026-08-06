@@ -1,8 +1,9 @@
 import * as keystore from '@nangohq/keystore';
+import { connectionTagsSchema } from '@nangohq/shared';
 import { Err, Ok } from '@nangohq/utils';
 
 import type { Knex } from '@nangohq/database';
-import type { ConnectSession, ConnectSessionIntegrationConfigDefaults, ConnectSessionOverrides, InternalEndUser } from '@nangohq/types';
+import type { ConnectSession, ConnectSessionIntegrationConfigDefaults, ConnectSessionOverrides, InternalEndUser, Tags } from '@nangohq/types';
 import type { Result } from '@nangohq/utils';
 import type { SetOptional } from 'type-fest';
 
@@ -20,7 +21,9 @@ export interface DBConnectSession {
     readonly allowed_integrations: string[] | null;
     readonly integrations_config_defaults: Record<string, ConnectSessionIntegrationConfigDefaults> | null;
     readonly overrides: Record<string, ConnectSessionOverrides> | null;
+    readonly webhook_url_override: string | null;
     readonly end_user: InternalEndUser | null;
+    readonly tags: Tags;
 }
 type DbInsertConnectSession = Omit<DBConnectSession, 'id' | 'created_at' | 'updated_at'>;
 
@@ -38,7 +41,9 @@ const ConnectSessionMapper = {
             allowed_integrations: session.allowedIntegrations || null,
             integrations_config_defaults: session.integrationsConfigDefaults || null,
             overrides: session.overrides || null,
-            end_user: session.endUser || null
+            webhook_url_override: session.webhookUrlOverride || null,
+            end_user: session.endUser || null,
+            tags: session.tags
         };
     },
     from: (dbSession: DBConnectSession): ConnectSession => {
@@ -54,7 +59,9 @@ const ConnectSessionMapper = {
             allowedIntegrations: dbSession.allowed_integrations || null,
             integrationsConfigDefaults: dbSession.integrations_config_defaults || null,
             overrides: dbSession.overrides || null,
-            endUser: dbSession.end_user || null
+            webhookUrlOverride: dbSession.webhook_url_override || null,
+            endUser: dbSession.end_user || null,
+            tags: dbSession.tags
         };
     }
 };
@@ -85,7 +92,9 @@ export async function createConnectSession(
         integrationsConfigDefaults,
         operationId,
         overrides,
-        endUser
+        webhookUrlOverride,
+        endUser,
+        tags
     }: SetOptional<
         Pick<
             ConnectSession,
@@ -96,12 +105,27 @@ export async function createConnectSession(
             | 'environmentId'
             | 'operationId'
             | 'overrides'
+            | 'webhookUrlOverride'
             | 'endUser'
             | 'endUserId'
+            | 'tags'
         >,
         'connectionId'
     >
 ): Promise<Result<ConnectSession, ConnectSessionError>> {
+    let normalizedTags: Tags = {};
+    const result = connectionTagsSchema.safeParse(tags);
+    if (!result.success) {
+        return Err(
+            new ConnectSessionError({
+                code: 'creation_failed',
+                message: result.error.issues[0]?.message ?? 'Invalid tags',
+                payload: { tags }
+            })
+        );
+    }
+    normalizedTags = result.data;
+
     const dbSession: DbInsertConnectSession = {
         end_user_id: endUserId || null,
         account_id: accountId,
@@ -111,8 +135,11 @@ export async function createConnectSession(
         integrations_config_defaults: integrationsConfigDefaults,
         operation_id: operationId,
         overrides: overrides || null,
-        end_user: endUser
+        webhook_url_override: webhookUrlOverride || null,
+        end_user: endUser,
+        tags: normalizedTags
     };
+
     const [session] = await db.insert<DBConnectSession>(dbSession).into(CONNECT_SESSIONS_TABLE).returning('*');
     if (!session) {
         return Err(

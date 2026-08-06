@@ -21,24 +21,24 @@ describe(`GET ${route}`, () => {
     });
 
     it('should be authorized by private key', async () => {
-        const { env } = await seeders.seedAccountEnvAndUser();
-        const res = await api.fetch(route, { method: 'GET', token: env.secret_key, query: {} });
+        const { apiKey } = await seeders.seedAccountEnvAndUser();
+        const res = await api.fetch(route, { method: 'GET', token: apiKey.secret, query: {} });
         isSuccess(res.json);
         expect(res.res.status).toBe(200);
     });
 
     it('should be authorized by connect session token', async () => {
-        const { env } = await seeders.seedAccountEnvAndUser();
-        const token = await getConnectSessionToken(api, env);
+        const { apiKey } = await seeders.seedAccountEnvAndUser();
+        const token = await getConnectSessionToken(api, apiKey.secret);
         const res = await api.fetch(route, { method: 'GET', token, query: {} });
         isSuccess(res.json);
         expect(res.res.status).toBe(200);
     });
 
     it('should list all', async () => {
-        const { env } = await seeders.seedAccountEnvAndUser();
+        const { apiKey } = await seeders.seedAccountEnvAndUser();
         const res = await api.fetch(route, {
-            token: env.secret_key,
+            token: apiKey.secret,
             query: {}
         });
 
@@ -50,30 +50,55 @@ describe(`GET ${route}`, () => {
     });
 
     it('should allow search', async () => {
-        const { env } = await seeders.seedAccountEnvAndUser();
+        const { apiKey } = await seeders.seedAccountEnvAndUser();
         const res = await api.fetch(route, {
-            token: env.secret_key,
-            query: { search: 'hubspot' }
+            token: apiKey.secret,
+            query: { search: 'outreach' }
         });
 
         isSuccess(res.json);
         expect(res.json).toMatchObject<typeof res.json>({
             data: [
                 {
-                    display_name: 'HubSpot',
-                    docs: 'https://nango.dev/docs/api-integrations/hubspot',
-                    logo_url: 'http://localhost:3003/images/template-logos/hubspot.svg',
-                    name: 'hubspot',
+                    display_name: 'Outreach',
+                    docs: 'https://nango.dev/docs/integrations/all/outreach',
+                    logo_url: 'http://localhost:3003/images/template-logos/outreach.svg',
+                    name: 'outreach',
                     auth_mode: 'OAUTH2'
                 }
             ]
         });
     });
 
-    it('should return empty array when search has no results', async () => {
-        const { env } = await seeders.seedAccountEnvAndUser();
+    it('should return multiple results when search matches several providers', async () => {
+        const { apiKey } = await seeders.seedAccountEnvAndUser();
         const res = await api.fetch(route, {
-            token: env.secret_key,
+            token: apiKey.secret,
+            query: { search: 'hubspot' }
+        });
+
+        isSuccess(res.json);
+        expect(res.json.data.length).toBe(2);
+        expect(res.json.data).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    display_name: 'HubSpot',
+                    name: 'hubspot',
+                    auth_mode: 'OAUTH2'
+                }),
+                expect.objectContaining({
+                    display_name: 'HubSpot (MCP)',
+                    name: 'hubspot-mcp',
+                    auth_mode: 'MCP_OAUTH2'
+                })
+            ])
+        );
+    });
+
+    it('should return empty array when search has no results', async () => {
+        const { apiKey } = await seeders.seedAccountEnvAndUser();
+        const res = await api.fetch(route, {
+            token: apiKey.secret,
             query: { search: 'foobar' }
         });
 

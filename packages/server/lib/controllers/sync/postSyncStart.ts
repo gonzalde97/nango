@@ -1,8 +1,7 @@
 import * as z from 'zod';
 
 import { logContextGetter } from '@nangohq/logs';
-import { records as recordsService } from '@nangohq/records';
-import { SyncCommand, normalizedSyncParams, syncManager } from '@nangohq/shared';
+import { errorManager, normalizedSyncParams, SyncCommand, syncManager } from '@nangohq/shared';
 import { zodErrorToHTTP } from '@nangohq/utils';
 
 import { connectionIdSchema, providerConfigKeySchema } from '../../helpers/validation.js';
@@ -40,7 +39,6 @@ export const postPublicSyncStart = asyncWrapper<PostPublicSyncStart>(async (req,
     const { environment } = res.locals;
 
     const resSyncCommand = await syncManager.runSyncCommand({
-        recordsService,
         orchestrator,
         environment,
         providerConfigKey: body.provider_config_key,
@@ -51,7 +49,7 @@ export const postPublicSyncStart = asyncWrapper<PostPublicSyncStart>(async (req,
         initiator: 'API call'
     });
     if (!resSyncCommand.success) {
-        res.status(500).send({ error: { code: 'server_error', message: 'failed to start syncs', errors: [resSyncCommand.error!] } });
+        errorManager.errResFromNangoErr(res, resSyncCommand.error);
         return;
     }
 

@@ -95,7 +95,7 @@ export function getFullIndexName(prefix: string, createdAt: string) {
     return `${prefix}.${new Date(createdAt).toISOString().split('T')[0]}`;
 }
 
-export function createCursor({ sort }: estypes.SearchHit): string {
+export function createCursor({ sort }: Pick<estypes.SearchHit, 'sort'>): string {
     return Buffer.from(JSON.stringify(sort)).toString('base64');
 }
 
@@ -120,6 +120,8 @@ export const operationTypeToMessage: Record<ConcatOperationList, string> = {
     'sync:request_run': 'Incremental execution triggered',
     'sync:run': 'Sync executed',
     'sync:unpause': 'Sync schedule resumed',
+    'sync:create_variant': 'Sync variant created',
+    'sync:delete_variant': 'Sync variant deleted',
     'webhook:incoming': 'External webhook executed',
     'webhook:forward': 'External webhook forwarded',
     'webhook:sync': 'Sync completion webhooks',

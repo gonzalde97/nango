@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import db from '@nangohq/database';
-import { PROD_ENVIRONMENT_NAME, environmentService, getProvider, seeders } from '@nangohq/shared';
+import { customerKeyService, environmentService, getProvider, PROD_ENVIRONMENT_NAME, seeders } from '@nangohq/shared';
 import { createConfigSeed } from '@nangohq/shared/lib/seeders/config.seeder.js';
 import { createSyncSeeds } from '@nangohq/shared/lib/seeders/index.js';
 
@@ -38,11 +38,13 @@ describe(`DELETE ${endpoint}`, () => {
             throw new Error('Failed to create prod environment');
         }
 
+        const prodApiKeys = (await customerKeyService.getApiKeysByEnv(db.knex, prodEnv.id)).unwrap();
+
         const res = await api.fetch(endpoint, {
             method: 'DELETE',
             // @ts-expect-error query params are required
             query: { env: PROD_ENVIRONMENT_NAME },
-            token: prodEnv.secret_key
+            token: prodApiKeys[0]!.secret
         });
 
         expect(res.res.status).toBe(400);
@@ -62,11 +64,13 @@ describe(`DELETE ${endpoint}`, () => {
             throw new Error('Failed to create test environment');
         }
 
+        const testApiKeys = (await customerKeyService.getApiKeysByEnv(db.knex, testEnv.id)).unwrap();
+
         const res = await api.fetch(endpoint, {
             method: 'DELETE',
             // @ts-expect-error query params are required
             query: { env: testEnv.name },
-            token: testEnv.secret_key
+            token: testApiKeys[0]!.secret
         });
 
         expect(res.res.status).toBe(204);
@@ -83,6 +87,8 @@ describe(`DELETE ${endpoint}`, () => {
         if (!testEnv) {
             throw new Error('Failed to create test environment');
         }
+
+        const testApiKeys = (await customerKeyService.getApiKeysByEnv(db.knex, testEnv.id)).unwrap();
 
         // Create a provider config for this environment
         const providerName = 'github';
@@ -127,7 +133,7 @@ describe(`DELETE ${endpoint}`, () => {
             method: 'DELETE',
             // @ts-expect-error query params are required
             query: { env: testEnv.name },
-            token: testEnv.secret_key
+            token: testApiKeys[0]!.secret
         });
 
         expect(res.res.status).toBe(204);

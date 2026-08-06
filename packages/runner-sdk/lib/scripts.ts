@@ -1,18 +1,21 @@
 import type { NangoActionBase } from './action.js';
 import type { NangoSyncBase } from './sync.js';
-import type { ZodMetadata, ZodModel } from './types.js';
+import type { ZodCheckpoint, ZodMetadata, ZodModel } from './types.js';
 import type { NangoSyncEndpointV2 } from '@nangohq/types';
 import type { MaybePromise } from 'rollup';
 import type * as z from 'zod';
 
-export type CreateAnyResponse = CreateSyncResponse<any, any> | CreateActionResponse<any, any> | CreateOnEventResponse;
+export type CreateAnyResponse =
+    | CreateSyncResponse<any, ZodMetadata, ZodCheckpoint>
+    | CreateActionResponse<any, any, ZodMetadata, ZodCheckpoint>
+    | CreateOnEventResponse<ZodMetadata, ZodCheckpoint>;
 
 export type { ActionError } from './errors.js';
 export type { NangoActionBase as NangoAction, ProxyConfiguration } from './action.js';
 export type { NangoSyncBase as NangoSync } from './sync.js';
 
 // ----- Sync
-export interface CreateSyncProps<TModels extends Record<string, ZodModel>, TMetadata extends ZodMetadata = never> {
+export interface CreateSyncProps<TModels extends Record<string, ZodModel>, TMetadata extends ZodMetadata = never, TCheckpoint extends ZodCheckpoint = never> {
     /**
      * The version of the sync.
      * Use it to track changes to the sync inside Nango's UI.
@@ -34,6 +37,7 @@ export interface CreateSyncProps<TModels extends Record<string, ZodModel>, TMeta
      * You can call this endpoint to fetch records synced by the sync.
      * You need one endpoint per model.
      *
+     * @deprecated Endpoints are no longer required. This field will be removed in a future version.
      * @example
      * ```ts
      * endpoints: [{ method: 'GET', path: '/github/issues' }],
@@ -42,7 +46,7 @@ export interface CreateSyncProps<TModels extends Record<string, ZodModel>, TMeta
      * const res = await fetch('https://api.nango.dev/github/issues');
      * ```
      */
-    endpoints: NangoSyncEndpointV2[];
+    endpoints?: NangoSyncEndpointV2[];
 
     /**
      * The frequency of the sync.
@@ -69,13 +73,14 @@ export interface CreateSyncProps<TModels extends Record<string, ZodModel>, TMeta
 
     /**
      * The type of the sync.
+     * @deprecated This option will be removed in future versions.
      */
-    syncType: 'full' | 'incremental';
+    syncType?: 'full' | 'incremental';
 
     /**
      * If `true`, automatically detects deleted records and removes them when you fetch the latest data.
      *
-     * @deprecated This option will be removed in future versions. Please automatically detect deletions by calling `nango.deleteRecordsFromPreviousExecutions()` in your sync script.
+     * @deprecated This option will be removed in future versions. Please automatically detect deletions by calling `nango.trackDeletesStart()` and `nango.trackDeletesEnd()` in your sync function.
      * @default false
      */
     trackDeletes?: boolean;
@@ -113,6 +118,21 @@ export interface CreateSyncProps<TModels extends Record<string, ZodModel>, TMeta
     metadata?: TMetadata;
 
     /**
+     * The checkpoint schema for storing sync progress and resume state.
+     * Checkpoint must be an object with string, number or boolean values.
+     * Nested objects or arrays are not supported.
+     *
+     * @example
+     * ```ts
+     * checkpoint: z.object({
+     *     lastPage: z.number(),
+     *     cursor: z.string(),
+     * });
+     * ```
+     */
+    checkpoint?: TCheckpoint;
+
+    /**
      * The webhook subscriptions of the sync.
      * Specify the types of webhooks the method `onWebhook` will handle.
      * If a webhook type is not on the list, it will not be handled.
@@ -135,7 +155,7 @@ export interface CreateSyncProps<TModels extends Record<string, ZodModel>, TMeta
      * }
      * ```
      */
-    exec: (nango: NangoSyncBase<TModels, TMetadata>) => MaybePromise<void>;
+    exec: (nango: NangoSyncBase<TModels, TMetadata, TCheckpoint>) => MaybePromise<void>;
 
     /**
      * The function that will be called when a webhook is received.
@@ -147,10 +167,13 @@ export interface CreateSyncProps<TModels extends Record<string, ZodModel>, TMeta
      * }
      * ```
      */
-    onWebhook?: (nango: NangoSyncBase<TModels, TMetadata>, payload: any) => MaybePromise<void>;
+    onWebhook?: (nango: NangoSyncBase<TModels, TMetadata, TCheckpoint>, payload: any) => MaybePromise<void>;
 }
-export interface CreateSyncResponse<TModels extends Record<string, ZodModel>, TMetadata extends ZodMetadata = undefined>
-    extends CreateSyncProps<TModels, TMetadata> {
+export interface CreateSyncResponse<
+    TModels extends Record<string, ZodModel>,
+    TMetadata extends ZodMetadata = undefined,
+    TCheckpoint extends ZodCheckpoint = undefined
+> extends CreateSyncProps<TModels, TMetadata, TCheckpoint> {
     type: 'sync';
 }
 /**
@@ -170,14 +193,19 @@ export interface CreateSyncResponse<TModels extends Record<string, ZodModel>, TM
  * export default sync;
  * ```
  */
-export function createSync<TModels extends Record<string, ZodModel>, TMetadata extends ZodMetadata = undefined>(
-    params: CreateSyncProps<TModels, TMetadata>
-): CreateSyncResponse<TModels, TMetadata> {
+export function createSync<TModels extends Record<string, ZodModel>, TMetadata extends ZodMetadata = undefined, TCheckpoint extends ZodCheckpoint = undefined>(
+    params: CreateSyncProps<TModels, TMetadata, TCheckpoint>
+): CreateSyncResponse<TModels, TMetadata, TCheckpoint> {
     return { type: 'sync', ...params };
 }
 
 // ----- Action
-export interface CreateActionProps<TInput extends z.ZodTypeAny, TOutput extends z.ZodTypeAny, TMetadata extends ZodMetadata = undefined> {
+export interface CreateActionProps<
+    TInput extends z.ZodTypeAny,
+    TOutput extends z.ZodTypeAny,
+    TMetadata extends ZodMetadata = undefined,
+    TCheckpoint extends ZodCheckpoint = undefined
+> {
     /**
      * The version of the action.
      * Use it to track changes to the action inside Nango's UI.
@@ -198,6 +226,7 @@ export interface CreateActionProps<TInput extends z.ZodTypeAny, TOutput extends 
      * The endpoint of the action.
      * You can call this endpoint to trigger the action.
      *
+     * @deprecated Endpoints are no longer required. This field will be removed in a future version.
      * @example
      * ```ts
      * endpoint: { method: 'POST', path: '/github/issues' },
@@ -211,7 +240,7 @@ export interface CreateActionProps<TInput extends z.ZodTypeAny, TOutput extends 
      * });
      * ```
      */
-    endpoint: NangoSyncEndpointV2;
+    endpoint?: NangoSyncEndpointV2;
 
     /**
      * The input required by the action when triggering it.
@@ -252,6 +281,21 @@ export interface CreateActionProps<TInput extends z.ZodTypeAny, TOutput extends 
     metadata?: TMetadata;
 
     /**
+     * The checkpoint schema for storing action progress and resume state.
+     * Checkpoint must be an object with string, number or boolean values.
+     * Nested objects or arrays are not supported.
+     *
+     * @example
+     * ```ts
+     * checkpoint: z.object({
+     *     lastPage: z.number(),
+     *     cursor: z.string(),
+     * });
+     * ```
+     */
+    checkpoint?: TCheckpoint;
+
+    /**
      * The integration's scopes required by the action.
      * This field is for documentation purposes only and currently not enforced by Nango.
      *
@@ -271,10 +315,14 @@ export interface CreateActionProps<TInput extends z.ZodTypeAny, TOutput extends 
      * }
      * ```
      */
-    exec: (nango: NangoActionBase<TMetadata>, input: z.infer<TInput>) => MaybePromise<z.infer<TOutput>>;
+    exec: (nango: NangoActionBase<TMetadata, TCheckpoint>, input: z.infer<TInput>) => MaybePromise<z.infer<TOutput>>;
 }
-export interface CreateActionResponse<TInput extends z.ZodTypeAny, TOutput extends z.ZodTypeAny, TMetadata extends ZodMetadata = undefined>
-    extends CreateActionProps<TInput, TOutput, TMetadata> {
+export interface CreateActionResponse<
+    TInput extends z.ZodTypeAny,
+    TOutput extends z.ZodTypeAny,
+    TMetadata extends ZodMetadata = undefined,
+    TCheckpoint extends ZodCheckpoint = undefined
+> extends CreateActionProps<TInput, TOutput, TMetadata, TCheckpoint> {
     type: 'action';
 }
 /**
@@ -298,14 +346,17 @@ export interface CreateActionResponse<TInput extends z.ZodTypeAny, TOutput exten
  * export default action;
  * ```
  */
-export function createAction<TInput extends z.ZodTypeAny, TOutput extends z.ZodTypeAny, TMetadata extends ZodMetadata = undefined>(
-    params: CreateActionProps<TInput, TOutput, TMetadata>
-): CreateActionResponse<TInput, TOutput, TMetadata> {
+export function createAction<
+    TInput extends z.ZodTypeAny,
+    TOutput extends z.ZodTypeAny,
+    TMetadata extends ZodMetadata = undefined,
+    TCheckpoint extends ZodCheckpoint = undefined
+>(params: CreateActionProps<TInput, TOutput, TMetadata, TCheckpoint>): CreateActionResponse<TInput, TOutput, TMetadata, TCheckpoint> {
     return { type: 'action', ...params };
 }
 
 // ----- On Event
-export interface CreateOnEventProps<TMetadata extends ZodMetadata = undefined> {
+export interface CreateOnEventProps<TMetadata extends ZodMetadata = undefined, TCheckpoint extends ZodCheckpoint = undefined> {
     /**
      * The version of the onEvent script.
      * Use it to track changes to the onEvent script inside Nango's UI.
@@ -341,6 +392,21 @@ export interface CreateOnEventProps<TMetadata extends ZodMetadata = undefined> {
     metadata?: TMetadata;
 
     /**
+     * The checkpoint schema for storing OnEvent script progress and resume state.
+     * Checkpoint must be an object with string, number or boolean values.
+     * Nested objects or arrays are not supported.
+     *
+     * @example
+     * ```ts
+     * checkpoint: z.object({
+     *     lastPage: z.number(),
+     *     cursor: z.string(),
+     * });
+     * ```
+     */
+    checkpoint?: TCheckpoint;
+
+    /**
      * The function that will be called when the onEvent script is triggered.
      * @example
      * ```ts
@@ -349,14 +415,17 @@ export interface CreateOnEventProps<TMetadata extends ZodMetadata = undefined> {
      * }
      * ```
      */
-    exec: (nango: NangoActionBase<TMetadata>) => MaybePromise<void>;
+    exec: (nango: NangoActionBase<TMetadata, TCheckpoint>) => MaybePromise<void>;
 }
-export interface CreateOnEventResponse<TMetadata extends ZodMetadata = undefined> extends CreateOnEventProps<TMetadata> {
+export interface CreateOnEventResponse<TMetadata extends ZodMetadata = undefined, TCheckpoint extends ZodCheckpoint = undefined>
+    extends CreateOnEventProps<TMetadata, TCheckpoint> {
     type: 'onEvent';
 }
 /**
  * Create an onEvent script
  */
-export function createOnEvent<TMetadata extends ZodMetadata = undefined>(params: CreateOnEventProps<TMetadata>): CreateOnEventResponse<TMetadata> {
+export function createOnEvent<TMetadata extends ZodMetadata = undefined, TCheckpoint extends ZodCheckpoint = undefined>(
+    params: CreateOnEventProps<TMetadata, TCheckpoint>
+): CreateOnEventResponse<TMetadata, TCheckpoint> {
     return { type: 'onEvent', ...params };
 }

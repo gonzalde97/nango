@@ -1,7 +1,7 @@
 import db from '@nangohq/database';
 import * as endUserService from '@nangohq/shared';
-import { connectUISettingsService } from '@nangohq/shared';
-import { report, requireEmptyBody, requireEmptyQuery, zodErrorToHTTP } from '@nangohq/utils';
+import { connectUISettingsService, getWebsocketsPath } from '@nangohq/shared';
+import { isCloud, report, requireEmptyBody, requireEmptyQuery, zodErrorToHTTP } from '@nangohq/utils';
 
 import { asyncWrapper } from '../../utils/asyncWrapper.js';
 
@@ -22,7 +22,7 @@ export const getConnectSession = asyncWrapper<GetConnectSession>(async (req, res
 
     const { connectSession, account, environment, plan } = res.locals;
 
-    let endUser: InternalEndUser;
+    let endUser: InternalEndUser | null = null;
     if (connectSession.endUserId) {
         const getEndUser = await endUserService.getEndUser(db.knex, {
             id: connectSession.endUserId,
@@ -37,8 +37,14 @@ export const getConnectSession = asyncWrapper<GetConnectSession>(async (req, res
         endUser = getEndUser.value;
     } else if (connectSession.endUser) {
         endUser = connectSession.endUser;
-    } else {
-        res.status(404).send({ error: { code: 'not_found', message: 'End user not found' } });
+    }
+
+    // Defensive check: end_user can only be skipped when tags were used.
+    // This is validated by zod at session creation time, but we keep an explicit guard
+    // here to avoid regressions if the validation rules change.
+    const tagsArePresent = connectSession.tags !== undefined && connectSession.tags !== null;
+    if (!endUser && !tagsArePresent) {
+        res.status(400).send({ error: { code: 'invalid_body', message: 'end_user is required unless tags are provided' } });
         return;
     }
 
@@ -53,19 +59,23 @@ export const getConnectSession = asyncWrapper<GetConnectSession>(async (req, res
         connectUISettings = connectUISettingsResult.value;
     }
 
+    const endUserData = endUser
+        ? {
+              id: endUser.endUserId,
+              display_name: endUser.displayName || null,
+              email: endUser.email || null,
+              tags: endUser.tags || null,
+              organization: endUser.organization
+                  ? {
+                        id: endUser.organization.organizationId,
+                        display_name: endUser.organization.displayName || null
+                    }
+                  : null
+          }
+        : null;
+
     const data: GetConnectSession['Success']['data'] = {
-        endUser: {
-            id: endUser.endUserId,
-            display_name: endUser.displayName || null,
-            email: endUser.email || null,
-            tags: endUser.tags || null,
-            organization: endUser.organization
-                ? {
-                      id: endUser.organization.organizationId,
-                      display_name: endUser.organization.displayName || null
-                  }
-                : null
-        },
+        endUser: endUserData,
         connectUISettings
     };
     if (connectSession.allowedIntegrations) {
@@ -88,6 +98,9 @@ export const getConnectSession = asyncWrapper<GetConnectSession>(async (req, res
     }
     if (connectSession.overrides) {
         data.overrides = connectSession.overrides;
+    }
+    if (!isCloud) {
+        data.websocketsPath = getWebsocketsPath();
     }
 
     res.status(200).send({ data });

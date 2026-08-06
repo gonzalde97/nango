@@ -1,49 +1,135 @@
-import { MagnifyingGlassIcon, PlusIcon } from '@heroicons/react/24/outline';
 import { flexRender, getCoreRowModel, useReactTable } from '@tanstack/react-table';
+import { PauseCircle, Plus, Search, ShieldAlert, TriangleAlert } from 'lucide-react';
+import { parseAsArrayOf, parseAsString, useQueryState } from 'nuqs';
 import { useEffect, useMemo, useState } from 'react';
 import { Helmet } from 'react-helmet';
-import { Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { useDebounce } from 'react-use';
 
-import { EndUserProfile } from './components/EndUserProfile';
-import { AvatarOrganization } from '../../components/AvatarCustom';
-import { CopyText } from '../../components/CopyText';
-import { ErrorCircle } from '../../components/ErrorCircle';
-import { ErrorPageComponent } from '../../components/ErrorComponent';
-import { MultiSelect } from '../../components/MultiSelect';
-import { SimpleTooltip } from '../../components/SimpleTooltip';
-import IntegrationLogo from '../../components/ui/IntegrationLogo';
-import { Skeleton } from '../../components/ui/Skeleton';
-import Spinner from '../../components/ui/Spinner';
-import * as Table from '../../components/ui/Table';
-import { Button, ButtonLink } from '../../components/ui/button/Button';
-import { Input } from '../../components/ui/input/Input';
-import { useConnections, useConnectionsCount } from '../../hooks/useConnections';
-import { useListIntegration } from '../../hooks/useIntegration';
-import DashboardLayout from '../../layout/DashboardLayout';
-import { useStore } from '../../store';
-import { getConnectionDisplayName } from '../../utils/endUser';
-import { formatDateToInternationalFormat } from '../../utils/utils';
+import { permissions } from '@nangohq/authz';
+import { Button, InputGroup, InputGroupAddon, InputGroupInput } from '@nangohq/design-system';
 
-import type { ApiConnectionSimple } from '@nangohq/types';
+import { ErrorPageComponent } from '@/components/patterns/ErrorComponent';
+import { IntegrationLogo } from '@/components/patterns/IntegrationLogo';
+import { PermissionGate } from '@/components/patterns/PermissionGate';
+import { Avatar } from '@/components/ui/Avatar';
+import { ButtonLink } from '@/components/ui/ButtonLink';
+import { ComboboxSelect } from '@/components/ui/Combobox';
+import { CopyButton } from '@/components/ui/CopyButton';
+import { Skeleton } from '@/components/ui/Skeleton';
+import { StatusWithIcon } from '@/components/ui/StatusWithIcon';
+import { StyledLink } from '@/components/ui/StyledLink';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/Table';
+import { useConnections } from '@/hooks/useConnections';
+import { useEnvironment } from '@/hooks/useEnvironment';
+import { useListIntegrations } from '@/hooks/useIntegration';
+import { usePermissions } from '@/hooks/usePermissions';
+import DashboardLayout from '@/layout/DashboardLayout';
+import { useStore } from '@/store';
+import { getConnectionDisplayName, getEndUserEmail } from '@/utils/endUser';
+import { formatDateToInternationalFormat } from '@/utils/utils';
+import { ConnectionCount } from './components/ConnectionCount';
+
+import type { ComboboxOption } from '@/components/ui/Combobox';
+import type { ApiConnectionSimple, ApiIntegrationList, GetConnections } from '@nangohq/types';
 import type { ColumnDef } from '@tanstack/react-table';
-import type React from 'react';
 
-const defaultFilter = ['all'];
-const filterErrors = [
-    { name: 'OK', value: 'ok' },
-    { name: 'Error', value: 'error' }
+type ConnectionRow = ApiConnectionSimple & { integration?: ApiIntegrationList };
+
+type StatusFilterValue = 'ok' | 'error' | 'auth_error' | 'sync_error' | 'paused';
+const validStatusFilterValues = new Set<string>(['ok', 'error', 'auth_error', 'sync_error', 'paused']);
+
+const statusOptions: ComboboxOption<StatusFilterValue>[] = [
+    { label: 'OK', value: 'ok' },
+    {
+        label: 'Error',
+        value: 'error',
+        children: [
+            { label: 'Auth error', value: 'auth_error' },
+            { label: 'Sync error', value: 'sync_error' }
+        ]
+    },
+    { label: 'Paused syncs', value: 'paused' }
 ];
 
-const columns: ColumnDef<ApiConnectionSimple>[] = [
+const parseSearch = parseAsString.withDefault('');
+const parseIntegrations = parseAsArrayOf(parseAsString, ',').withDefault([]);
+const parseStatusFilters = parseAsArrayOf(parseAsString, ',').withDefault([]);
+
+const columns: ColumnDef<ConnectionRow>[] = [
     {
         accessorKey: 'id',
         header: 'Customer',
-        size: 300,
+        size: 115,
         cell: ({ row }) => {
             const data = row.original;
 
-            const errorCounts = data.errors.reduce(
+            const displayName = getConnectionDisplayName({ endUser: data.endUser, connectionId: data.connection_id, connectionTags: data.tags });
+            const email = getEndUserEmail(data.endUser, data.tags);
+
+            return (
+                <div className="flex gap-2.5 items-center min-w-0">
+                    <Avatar name={displayName} />
+                    <div className="flex flex-col min-w-0 flex-1">
+                        <span className="text-body-small-semi text-text-strong truncate">{displayName}</span>
+                        <span className="text-body-small-regular text-text-muted truncate">{email ?? ''}</span>
+                    </div>
+                </div>
+            );
+        }
+    },
+    {
+        accessorKey: 'provider',
+        header: 'Integration',
+        size: 100,
+        cell: ({ row }) => {
+            const { provider, integration } = row.original;
+
+            return (
+                <div className="flex gap-1.5 items-center">
+                    <IntegrationLogo provider={provider} className="size-8 bg-transparent" />
+                    <span className="text-body-small-semi text-text-strong">{integration?.unique_key ?? provider}</span>
+                </div>
+            );
+        }
+    },
+    {
+        accessorKey: 'connection_id',
+        header: 'Connection ID',
+        size: 130,
+        cell: ({ row }) => {
+            const { connection_id } = row.original;
+
+            return (
+                <div className="flex gap-1.5 items-center min-w-0">
+                    <span className="text-body-extra-small-medium text-text-secondary truncate flex-1 min-w-0">{connection_id}</span>
+                    <CopyButton text={connection_id} />
+                </div>
+            );
+        }
+    },
+    {
+        accessorKey: 'created_at',
+        header: 'Created on',
+        size: 80,
+        cell: ({ row }) => {
+            const { created_at } = row.original;
+
+            return (
+                <time dateTime={created_at} title={created_at} className="text-code-body-small-regular text-text-muted">
+                    {formatDateToInternationalFormat(created_at)}
+                </time>
+            );
+        }
+    },
+    {
+        accessorKey: 'status',
+        header: '',
+        size: 25,
+        cell: ({ row }) => {
+            const { errors, pausedSyncs } = row.original;
+            const hasPausedSyncs = pausedSyncs.length > 0;
+            const errorCounts = errors.reduce(
                 (acc, error) => {
                     if (error.type === 'auth') {
                         acc.auth += 1;
@@ -56,310 +142,319 @@ const columns: ColumnDef<ApiConnectionSimple>[] = [
             );
 
             return (
-                <div className="flex gap-3 items-center">
-                    <AvatarOrganization
-                        email={data.endUser?.email ? data.endUser.email : null}
-                        displayName={getConnectionDisplayName({ endUser: data.endUser, connectionId: data.connection_id })}
-                    />
-
-                    {data.endUser ? (
-                        <EndUserProfile endUser={data.endUser} connectionId={data.connection_id} />
-                    ) : (
-                        <span className="break-words break-all truncate">{data.connection_id}</span>
-                    )}
+                <div className="flex gap-1 items-center">
                     {errorCounts.auth > 0 && (
-                        <SimpleTooltip tooltipContent="Expired credentials">
-                            <ErrorCircle icon="auth" />
-                        </SimpleTooltip>
+                        <StatusWithIcon tooltipContent="Expired credentials" variant="warning">
+                            <ShieldAlert />
+                        </StatusWithIcon>
                     )}
-
                     {errorCounts.sync > 0 && (
-                        <SimpleTooltip tooltipContent="Failed syncs">
-                            <ErrorCircle icon="sync" />
-                        </SimpleTooltip>
+                        <StatusWithIcon tooltipContent="Failed syncs" variant="warning">
+                            <TriangleAlert />
+                        </StatusWithIcon>
+                    )}
+                    {hasPausedSyncs && (
+                        <StatusWithIcon tooltipContent="Paused syncs" variant="neutral">
+                            <PauseCircle />
+                        </StatusWithIcon>
                     )}
                 </div>
-            );
-        }
-    },
-    {
-        accessorKey: 'provider_config_key',
-        header: 'Integration',
-        size: 180,
-        cell: ({ row }) => {
-            return (
-                <div className="flex gap-2 items-center">
-                    <IntegrationLogo provider={row.original.provider} height={7} width={7} />
-                    <p className="break-words break-all">{row.original.provider_config_key}</p>
-                </div>
-            );
-        }
-    },
-    {
-        accessorKey: 'connection_id',
-        header: 'Connection ID',
-        size: 130,
-        cell: ({ row }) => {
-            return <CopyText className="text-s font-code" text={row.original.connection_id} showOnHover />;
-        }
-    },
-    {
-        accessorKey: 'created_at',
-        header: 'Created',
-        size: 80,
-        cell: ({ row }) => {
-            return (
-                <time dateTime={row.original.created_at} title={row.original.created_at} className="text-right">
-                    {formatDateToInternationalFormat(row.original.created_at)}
-                </time>
             );
         }
     }
 ];
 
-export const ConnectionList: React.FC = () => {
+export const ConnectionList = () => {
     const env = useStore((state) => state.env);
+    const { data: environmentData } = useEnvironment(env);
+    const environment = environmentData?.environmentAndAccount?.environment;
 
-    const { list: listIntegration } = useListIntegration(env);
-    const { data: connectionsCount } = useConnectionsCount(env);
+    const { can } = usePermissions();
+    const canCreateTestConnection = can(permissions.canWriteProdConnections) || !environment?.is_production;
 
-    const [selectedIntegration, setSelectedIntegration] = useState<string[]>(defaultFilter);
-    const [search, setSearch] = useState<string>('');
+    const navigate = useNavigate();
+
+    const [search, setSearch] = useQueryState('search', parseSearch);
     const [debouncedSearch, setDebouncedSearch] = useState<string>('');
-    const [filterWithError, setFilterWithError] = useState<string>('all');
-    const [readyToDisplay, setReadyToDisplay] = useState<boolean>(false);
+    const [selectedIntegrations, setSelectedIntegrations] = useQueryState('integrations', parseIntegrations);
+    const [rawStatusFilters, setSelectedStatusFilters] = useQueryState('status', parseStatusFilters);
+    const selectedStatusFilters = useMemo(
+        () => (rawStatusFilters ?? []).filter((s): s is StatusFilterValue => validStatusFilterValues.has(s)),
+        [rawStatusFilters]
+    );
 
-    const { data, loading, error, hasNext, offset, setOffset } = useConnections({
+    useDebounce(() => setDebouncedSearch(search || ''), 300, [search]);
+
+    const { data: listIntegrationData, isLoading: integrationsLoading } = useListIntegrations(env);
+
+    const withError = useMemo(() => {
+        if (selectedStatusFilters.length === 0) return undefined;
+        const hasOk = selectedStatusFilters.includes('ok');
+        const hasErrorFilter = selectedStatusFilters.some((s) => s === 'error' || s === 'auth_error' || s === 'sync_error');
+        const hasPausedFilter = selectedStatusFilters.includes('paused');
+        if (hasOk && !hasErrorFilter && !hasPausedFilter) return false;
+        if (!hasOk && hasErrorFilter && !hasPausedFilter) return true;
+        return undefined;
+    }, [selectedStatusFilters]);
+
+    const integrationIds = useMemo(() => {
+        if (!selectedIntegrations || selectedIntegrations.length === 0) return undefined;
+        return selectedIntegrations;
+    }, [selectedIntegrations]);
+
+    const {
+        data: connectionsData,
+        isLoading: loading,
+        fetchNextPage,
+        hasNextPage,
+        isFetchingNextPage,
+        error: connectionsError
+    } = useConnections({
         env,
         search: debouncedSearch,
-        integrationIds: selectedIntegration,
-        withError: filterWithError === 'all' ? undefined : filterWithError === 'error'
+        integrationIds,
+        withError
     });
 
-    useDebounce(() => setDebouncedSearch(search), 250, [search]);
+    const connectionsWithIntegrations = useMemo(() => {
+        const connections = connectionsData?.pages.flatMap((page) => page.data) || [];
 
-    const handleInputChange = (event: React.ChangeEvent<HTMLInputElement> | React.KeyboardEvent<HTMLInputElement>) => {
-        setSearch(event.currentTarget.value);
-    };
+        return connections.map((connection) => ({
+            ...connection,
+            integration: listIntegrationData?.data?.find((integration) => integration.id === connection.config_id)
+        }));
+    }, [connectionsData, listIntegrationData?.data]);
 
-    const handleIntegrationChange = (values: string[]) => {
-        if (values.includes('all')) {
-            setSelectedIntegration(defaultFilter);
-            return;
+    const displayedConnections = useMemo(() => {
+        if (selectedStatusFilters.length === 0) return connectionsWithIntegrations;
+        return connectionsWithIntegrations.filter((conn) =>
+            selectedStatusFilters.some((filter) => {
+                switch (filter) {
+                    case 'ok':
+                        return conn.errors.length === 0;
+                    case 'error':
+                        return conn.errors.length > 0;
+                    case 'auth_error':
+                        return conn.errors.some((e) => e.type === 'auth');
+                    case 'sync_error':
+                        return conn.errors.some((e) => e.type === 'sync');
+                    case 'paused':
+                        return conn.pausedSyncs.length > 0;
+                }
+            })
+        );
+    }, [connectionsWithIntegrations, selectedStatusFilters]);
+
+    useEffect(() => {
+        if (selectedStatusFilters.length > 0 && displayedConnections.length === 0 && hasNextPage && !isFetchingNextPage) {
+            void fetchNextPage();
         }
-        setSelectedIntegration(values);
-    };
+    }, [displayedConnections.length, selectedStatusFilters.length, hasNextPage, isFetchingNextPage, fetchNextPage]);
 
-    const handleFilterErrorChange = (values: string[]) => {
-        const newItems = values.filter((f) => !filterWithError.includes(f));
-        setFilterWithError(newItems.length > 0 ? newItems[0] : defaultFilter[0]);
-    };
+    const hasFiltered = debouncedSearch || (selectedIntegrations && selectedIntegrations.length > 0) || selectedStatusFilters.length > 0;
 
-    const integrations = useMemo(() => {
-        if (!listIntegration) {
+    const connectionCount = displayedConnections.length;
+    const hasConnections = connectionCount > 0;
+    const showEmptyStateNoFilters = !loading && connectionCount === 0 && !hasFiltered;
+    const showEmptyStateWithFilters = !loading && !isFetchingNextPage && connectionCount === 0 && hasFiltered && !hasNextPage;
+    const coreRowModel = useMemo(() => getCoreRowModel(), []);
+    const table = useReactTable({
+        data: displayedConnections,
+        columns,
+        getCoreRowModel: coreRowModel
+    });
+
+    const integrationsOptions = useMemo(() => {
+        const list = listIntegrationData?.data;
+        if (!list) {
             return [];
         }
-        return listIntegration.map((integration) => {
-            return { name: integration.unique_key, value: integration.unique_key };
-        });
-    }, [listIntegration]);
+        return list.map((integration) => ({
+            label: integration.display_name || integration.unique_key,
+            value: integration.unique_key,
+            icon: <IntegrationLogo provider={integration.provider} className="size-7 rounded-[3.7px] p-[3.48px] bg-transparent border-transparent" />
+        }));
+    }, [listIntegrationData?.data]);
 
-    // --- Table Display
-    useEffect(() => {
-        if (!data) {
-            return;
-        }
-        if (!readyToDisplay) {
-            setReadyToDisplay(true);
-        }
-    }, [data, readyToDisplay]);
-    const connections = useMemo(() => {
-        return data?.flatMap((d) => d.data) || [];
-    }, [data]);
-
-    const table = useReactTable({
-        data: connections || [],
-        columns,
-        getCoreRowModel: getCoreRowModel()
-    });
-    const hasFiltered = debouncedSearch || selectedIntegration[0] !== 'all' || filterWithError !== 'all';
-
-    if (error) {
-        return <ErrorPageComponent title="Connections" error={error} />;
-    }
-
-    if (!connections || !readyToDisplay) {
-        return (
-            <DashboardLayout>
-                <Helmet>
-                    <title>Connections - Nango</title>
-                </Helmet>
-                <h2 className="text-3xl font-semibold text-white mb-4">Connections</h2>
-
-                <div className="flex gap-2 flex-col">
-                    <Skeleton style={{ width: '50%' }} />
-                    <Skeleton style={{ width: '50%' }} />
-                    <Skeleton style={{ width: '50%' }} />
-                </div>
-            </DashboardLayout>
-        );
+    if (connectionsError) {
+        return <ErrorPageComponent title="Connections" error={connectionsError.json as GetConnections['Errors']} />;
     }
 
     return (
-        <DashboardLayout>
+        <DashboardLayout fullWidth title="Connections">
             <Helmet>
                 <title>Connections - Nango</title>
             </Helmet>
-            <div className="flex justify-between mb-8 items-center">
-                <h2 className="flex text-left text-3xl font-semibold tracking-tight text-white">Connections</h2>
-                <div className="flex gap-2">
-                    <ButtonLink to={`/${env}/connections/create`}>
-                        <PlusIcon className="flex h-5 w-5 mr-2 text-black" />
-                        Add Test Connection
-                    </ButtonLink>
-                </div>
-            </div>
-            {connections && (connections.length > 0 || hasFiltered) && (
-                <>
-                    {connectionsCount?.data && (
-                        <div className="flex justify-end w-full text-[12px] text-white">
-                            {connectionsCount.data.total} connection{connectionsCount.data.total !== 1 ? 's' : ''}
-                            {connectionsCount.data.withError > 0 && (
-                                <SimpleTooltip
-                                    tooltipContent={`${connectionsCount.data.withAuthError} authorization error${connectionsCount.data.withAuthError !== 1 ? 's' : ''}, ${connectionsCount.data.withSyncError} synchronization error${connectionsCount.data.withSyncError !== 1 ? 's' : ''}`}
-                                >
-                                    <span className="flex items-center ml-1">
-                                        ({connectionsCount?.data.withError} errored)<span className="ml-1 bg-red-base h-1.5 w-1.5 rounded-full"></span>
-                                    </span>
-                                </SimpleTooltip>
+
+            <div className="flex flex-col gap-3">
+                {/* Content */}
+                <div className="flex flex-col gap-3">
+                    {(loading || hasConnections || hasFiltered) && (
+                        <>
+                            {/* Filters */}
+                            <div className="flex items-center gap-1.5">
+                                <InputGroup className="flex-1">
+                                    <InputGroupInput
+                                        type="text"
+                                        placeholder="Search connections"
+                                        value={search || ''}
+                                        onChange={(e) => setSearch(e.target.value)}
+                                    />
+                                    <InputGroupAddon>
+                                        <Search />
+                                    </InputGroupAddon>
+                                </InputGroup>
+                                <ComboboxSelect
+                                    allowMultiple
+                                    label={selectedIntegrations && selectedIntegrations.length > 0 ? `Integrations` : 'All integrations'}
+                                    dropdownTitle="All integrations"
+                                    onClearAll={() => setSelectedIntegrations([])}
+                                    options={integrationsOptions}
+                                    loading={integrationsLoading}
+                                    selected={selectedIntegrations || []}
+                                    onSelectedChange={(selected) => setSelectedIntegrations(selected)}
+                                    emptyText="No integrations found"
+                                    footer={
+                                        <div className="flex items-center justify-between gap-3">
+                                            <span className="flex items-center justify-center gap-2 text-text-muted text-body-small-regular">
+                                                Need a new integration?
+                                            </span>
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                size="sm"
+                                                onClick={() => {
+                                                    navigate(`/${env}/integrations/create`);
+                                                }}
+                                            >
+                                                <Plus className="size-4" /> Add
+                                            </Button>
+                                        </div>
+                                    }
+                                />
+                                <ComboboxSelect
+                                    allowMultiple
+                                    label="Status"
+                                    dropdownTitle="Select statuses"
+                                    onClearAll={() => setSelectedStatusFilters([])}
+                                    options={statusOptions}
+                                    selected={selectedStatusFilters}
+                                    onSelectedChange={setSelectedStatusFilters}
+                                    reorderOnSelect={false}
+                                    showSearch={false}
+                                />
+                                <PermissionGate condition={canCreateTestConnection}>
+                                    {(allowed) => (
+                                        <ButtonLink to={`/${env}/connections/create`} size="md" disabled={!allowed} className="ml-auto">
+                                            Add test connection
+                                        </ButtonLink>
+                                    )}
+                                </PermissionGate>
+                            </div>
+
+                            {/* Connection count */}
+                            <div className="flex items-center justify-end">
+                                <ConnectionCount />
+                            </div>
+
+                            {/* Table */}
+                            <Table>
+                                <TableHeader>
+                                    {table.getHeaderGroups().map((headerGroup) => (
+                                        <TableRow key={headerGroup.id}>
+                                            {headerGroup.headers.map((header) => {
+                                                return (
+                                                    <TableHead
+                                                        key={header.id}
+                                                        style={{
+                                                            maxWidth: header.getSize() !== 0 ? header.getSize() : undefined,
+                                                            width: header.getSize() !== 0 ? header.getSize() : undefined
+                                                        }}
+                                                        className="h-11"
+                                                    >
+                                                        {header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}
+                                                    </TableHead>
+                                                );
+                                            })}
+                                        </TableRow>
+                                    ))}
+                                </TableHeader>
+                                {loading && (
+                                    <TableBody>
+                                        {Array.from({ length: 3 }).map((_, rowIndex) => (
+                                            <TableRow key={rowIndex} className="h-16">
+                                                {table.getAllColumns().map((col, colIndex) => (
+                                                    <TableCell
+                                                        key={colIndex}
+                                                        style={{
+                                                            maxWidth: col.getSize() !== 0 ? col.getSize() : undefined
+                                                        }}
+                                                    >
+                                                        <Skeleton className="h-4" style={{ width: col.getSize() ? col.getSize() - 20 : 'auto' }} />
+                                                    </TableCell>
+                                                ))}
+                                            </TableRow>
+                                        ))}
+                                    </TableBody>
+                                )}
+                                {!loading && hasConnections && (
+                                    <TableBody>
+                                        {table.getRowModel().rows.map((row) => (
+                                            <TableRow
+                                                key={row.id}
+                                                className="h-16 cursor-pointer"
+                                                onClick={() => {
+                                                    navigate(`/${env}/connections/${row.original.provider_config_key}/${row.original.connection_id}`);
+                                                }}
+                                            >
+                                                {row.getVisibleCells().map((cell) => (
+                                                    <TableCell
+                                                        key={cell.id}
+                                                        style={{
+                                                            maxWidth: cell.column.getSize() !== 0 ? cell.column.getSize() : undefined
+                                                        }}
+                                                    >
+                                                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                                                    </TableCell>
+                                                ))}
+                                            </TableRow>
+                                        ))}
+                                    </TableBody>
+                                )}
+                            </Table>
+
+                            {showEmptyStateWithFilters && (
+                                <div className="flex flex-col gap-5 p-20 items-center justify-center bg-surface-panel rounded">
+                                    <p className="text-text-secondary text-body-medium-regular">No connections found.</p>
+                                </div>
                             )}
+                        </>
+                    )}
+                    {showEmptyStateNoFilters && (
+                        <div className="flex flex-col gap-5 p-20 items-center justify-center bg-surface-panel rounded">
+                            <h3 className="text-title-body text-text-strong">Connect to an external API</h3>
+                            <p className="text-text-secondary text-body-medium-regular">
+                                Connections can be created by using{' '}
+                                <StyledLink to="https://nango.dev/docs/guides/auth/auth-guide" type="external">
+                                    Nango Connect
+                                </StyledLink>
+                                , or manually here.
+                            </p>
+                            <ButtonLink to={`/${env}/connections/create`} size="lg">
+                                Add test connection
+                            </ButtonLink>
                         </div>
                     )}
-                    <div className="flex gap-2 relative my-3">
-                        <div className="grow">
-                            <Input
-                                inputSize={'sm'}
-                                before={<MagnifyingGlassIcon className="w-4" />}
-                                placeholder="Search by connection"
-                                className="border-active-gray"
-                                value={search}
-                                onChange={handleInputChange}
-                                onKeyUp={handleInputChange}
-                            />
-                        </div>
-                        <div className="flex gap-2">
-                            <MultiSelect
-                                label="Integrations"
-                                options={integrations}
-                                selected={selectedIntegration}
-                                defaultSelect={defaultFilter}
-                                onChange={handleIntegrationChange}
-                                all
-                            />
-                            <MultiSelect
-                                label="Filter Errors"
-                                options={filterErrors}
-                                selected={[filterWithError]}
-                                defaultSelect={defaultFilter}
-                                onChange={handleFilterErrorChange}
-                                all
-                            />
-                        </div>
-                    </div>
-                    <div>
-                        <Table.Table className="table-fixed">
-                            <Table.Header>
-                                {table.getHeaderGroups().map((headerGroup) => (
-                                    <Table.Row key={headerGroup.id}>
-                                        {headerGroup.headers.map((header) => {
-                                            return (
-                                                <Table.Head
-                                                    key={header.id}
-                                                    style={{
-                                                        width: header.getSize() !== 0 ? header.getSize() : undefined
-                                                    }}
-                                                >
-                                                    {header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}
-                                                </Table.Head>
-                                            );
-                                        })}
-                                    </Table.Row>
-                                ))}
-                            </Table.Header>
-                            <Table.Body>
-                                {loading && (
-                                    <Table.Row>
-                                        {table.getAllColumns().map((col, i) => {
-                                            return (
-                                                <Table.Cell key={i}>
-                                                    <Skeleton style={{ width: col.getSize() - 20 }} />
-                                                </Table.Cell>
-                                            );
-                                        })}
-                                    </Table.Row>
-                                )}
 
-                                {table.getRowModel().rows?.length > 0 &&
-                                    table.getRowModel().rows.map((row) => (
-                                        <Link
-                                            key={row.original.id}
-                                            to={`/${env}/connections/${row.original.provider_config_key}/${row.original.connection_id}`}
-                                            className="contents"
-                                        >
-                                            <Table.Row data-state={row.getIsSelected() && 'selected'} className="hover:cursor-pointer">
-                                                {row.getVisibleCells().map((cell) => (
-                                                    <Table.Cell key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</Table.Cell>
-                                                ))}
-                                            </Table.Row>
-                                        </Link>
-                                    ))}
-
-                                {connections.length <= 0 && hasFiltered && !loading && (
-                                    <Table.Row>
-                                        <Table.Cell colSpan={columns.length} className="h-24 text-center p-0 pt-4">
-                                            <div className="flex gap-2 flex-col border border-border-gray rounded-md items-center text-white text-center p-10 py-20">
-                                                <div className="text-center">No connections found</div>
-                                            </div>
-                                        </Table.Cell>
-                                    </Table.Row>
-                                )}
-                            </Table.Body>
-                        </Table.Table>
-                    </div>
-
-                    {hasNext && readyToDisplay && (
-                        <div>
-                            <Button disabled={loading} variant="active" className="w-full justify-center" onClick={() => setOffset(offset + 1)}>
-                                {loading ? (
-                                    <>
-                                        <Spinner size={1} /> Loading...
-                                    </>
-                                ) : (
-                                    'Load More'
-                                )}
+                    {hasNextPage && (
+                        <div className="self-center">
+                            <Button onClick={() => fetchNextPage()} loading={isFetchingNextPage} variant="outline">
+                                Load More
                             </Button>
                         </div>
                     )}
-                </>
-            )}
-            {connections && connections.length === 0 && !hasFiltered && (
-                <div className="flex flex-col gap-2 border border-border-gray rounded-md items-center text-white text-center p-10 py-20">
-                    <h2 className="text-2xl text-center w-full">Connect to an external API</h2>
-                    <div className="text-gray-400">
-                        Connections can be created by using{' '}
-                        <Link to="https://nango.dev/docs/implementation-guides/api-auth/implement-api-auth" className="text-blue-500">
-                            Nango Connect
-                        </Link>
-                        , or manually here.
-                    </div>
-                    <div className="flex my-2 items-center bg-white rounded-md">
-                        <ButtonLink to={`/${env}/connections/create`}>
-                            <PlusIcon className="flex h-5 w-5 mr-2 text-black" />
-                            Add Test Connection
-                        </ButtonLink>
-                    </div>
                 </div>
-            )}
+            </div>
         </DashboardLayout>
     );
 };

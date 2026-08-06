@@ -14,15 +14,20 @@ const prettyAuthModes: Record<string, string> = {
     APP_STORE: 'Custom',
     BILL: 'Bill',
     SIGNATURE: 'Signature',
+    AWS_SIGV4: 'AWS SigV4',
     JWT: 'JWT',
     TWO_STEP: 'Two Step',
-    TABLEAU: 'Tableau'
+    TABLEAU: 'Tableau',
+    MCP_OAUTH2: 'MCP OAuth2'
 };
 
 const flowsPath = 'packages/shared/flows.zero.json';
 const providersPath = 'packages/providers/providers.yaml';
-const docsPath = 'docs/integrations/all';
+const docsPaths = ['docs/integrations/all', 'docs/api-integrations'];
 const snippetsPath = 'docs/snippets/generated';
+
+// TODO: remove once alias providers declare webhook support in providers.yaml explicitly.
+const snippetSkipList = new Set(['confluence']);
 
 const flowsString = await fs.readFile(flowsPath, 'utf-8');
 const flows = JSON.parse(flowsString);
@@ -40,36 +45,57 @@ for (const flow of flows) {
 }
 
 const providersHandled: string[] = [];
-const files = await fs.readdir(docsPath);
-for (const file of files) {
-    if (file.endsWith('.mdx')) {
-        const provider = path.basename(file, '.mdx');
-        const snippetPath = `${snippetsPath}/${path.basename(file, '.mdx')}`;
+for (const docsPath of docsPaths) {
+    const files = await fs.readdir(docsPath);
+    for (const file of files) {
+        if (file.endsWith('.mdx')) {
+            const provider = path.basename(file, '.mdx');
 
-        await fs.mkdir(snippetPath, { recursive: true });
+            // Skip if already processed from another directory
+            if (providersHandled.includes(provider)) {
+                console.log(`Skipping ${provider} (already processed from another directory)`);
+                continue;
+            }
 
-        const maybeAliased: Provider | undefined = providers[provider];
-        if (!maybeAliased) {
-            throw new Error(`Couldn't find provider config for  ${provider}`);
+            if (snippetSkipList.has(provider)) {
+                providersHandled.push(provider);
+                continue;
+            }
+
+            const snippetPath = `${snippetsPath}/${path.basename(file, '.mdx')}`;
+
+            await fs.mkdir(snippetPath, { recursive: true });
+
+            const maybeAliased: Provider | undefined = providers[provider];
+            if (!maybeAliased) {
+                throw new Error(`Couldn't find provider config for  ${provider}`);
+            }
+
+            const providerConfig: Provider | undefined = (maybeAliased as any)['alias'] ? providers[(maybeAliased as any)['alias']] : maybeAliased;
+            if (!providerConfig) {
+                throw new Error(`Couldn't find provider alias for ${(maybeAliased as any)['alias']}`);
+            }
+
+            const docLink = maybeAliased.docs.split('/').slice(-1)[0];
+            if (docLink !== provider) {
+                console.log(`Docs link doesn't match provider name: ${docLink} !== ${provider}`);
+            }
+
+            // MCP providers don't have pre-built templates — skip snippet generation.
+            if (maybeAliased.categories?.includes('mcp')) {
+                providersHandled.push(provider);
+                continue;
+            }
+
+            const isAlias = !!(maybeAliased as any)['alias'];
+            const toolingSnippet = preBuiltToolingSnippet(providerConfig, useCases[provider], isAlias);
+            await fs.writeFile(`${snippetPath}/PreBuiltTooling.mdx`, toolingSnippet, 'utf-8');
+
+            const casesSnippet = useCasesSnippet(useCases[provider]);
+            await fs.writeFile(`${snippetPath}/PreBuiltUseCases.mdx`, casesSnippet, 'utf-8');
+
+            providersHandled.push(provider);
         }
-
-        const providerConfig: Provider | undefined = (maybeAliased as any)['alias'] ? providers[(maybeAliased as any)['alias']] : maybeAliased;
-        if (!providerConfig) {
-            throw new Error(`Couldn't find provider alias for ${(maybeAliased as any)['alias']}`);
-        }
-
-        const docLink = maybeAliased.docs.split('/').slice(-1)[0];
-        if (docLink !== provider) {
-            console.log(`Docs link doesn't match provider name: ${docLink} !== ${provider}`);
-        }
-
-        const toolingSnippet = preBuiltToolingSnippet(providerConfig, useCases[provider]);
-        await fs.writeFile(`${snippetPath}/PreBuiltTooling.mdx`, toolingSnippet, 'utf-8');
-
-        const casesSnippet = useCasesSnippet(useCases[provider]);
-        await fs.writeFile(`${snippetPath}/PreBuiltUseCases.mdx`, casesSnippet, 'utf-8');
-
-        providersHandled.push(provider);
     }
 }
 
@@ -80,12 +106,13 @@ if (missingDocs.length > 0) {
     console.log(`Missing provider docs: ${missingDocs.join(', ')}`);
 }
 
-function preBuiltToolingSnippet(providerConfig: Provider, useCases: any) {
+function preBuiltToolingSnippet(providerConfig: Provider, useCases: any, isAlias = false) {
     const prettyAuthMode = prettyAuthModes[providerConfig.auth_mode];
     const hasAuthParams = !!providerConfig.authorization_params;
     const hasAuthGuide = !!providerConfig.docs_connect;
     const hasUseCases = useCases && useCases.length > 0;
-    const hasWebHooks = !!providerConfig.webhook_routing_script;
+    // TODO: remove once alias providers declare webhook support in providers.yaml explicitly.
+    const hasWebHooks = !isAlias && !!providerConfig.webhook_routing_script;
     const hasPagination = !!providerConfig.proxy?.paginate;
     const hasRateLimit = !!providerConfig.proxy?.retry?.at;
 
@@ -117,7 +144,7 @@ function preBuiltToolingSnippet(providerConfig: Provider, useCases: any) {
         `| Tools | Status |`,
         `| - | - |`,
         `| HTTP request logging | ✅ |`,
-        `| End-to-type type safety | ✅ |`,
+        `| End-to-end type safety | ✅ |`,
         `| Data runtime validation | ✅ |`,
         `| OpenTelemetry export | ✅ |`,
         `| Slack alerts on errors | ✅ |`,
@@ -177,7 +204,7 @@ function useCasesSnippet(useCases: any) {
 ${endpoints
     .map(
         (endpoint) =>
-            `| \`${endpoint.functionName}\` | ${endpoint.description?.replaceAll('\n', ' ') ?? ''} | [${endpoint.type === 'sync' ? 'Sync' : 'Action'}](/guides/use-cases/${endpoint.type}s) | [🔗 Github](https://github.com/NangoHQ/integration-templates/blob/main/integrations/${endpoint.script}.ts) |`
+            `| \`${endpoint.functionName}\` | ${endpoint.description?.replaceAll('\n', ' ') ?? ''} | [${endpoint.type === 'sync' ? 'Sync' : 'Action'}](${endpoint.type === 'sync' ? '/guides/functions/syncs/sync-functions' : '/guides/functions/action-functions'}) | [🔗 Github](https://github.com/NangoHQ/integration-templates/blob/main/integrations/${endpoint.script}.ts) |`
     )
     .join('\n')}
             `.trim();
@@ -190,7 +217,7 @@ ${endpoints
 function emptyUseCases() {
     return `_No pre-built syncs or actions available yet._
 
-<Tip>Not seeing the integration you need? [Build your own](https://nango.dev/docs/guides/platform/functions) independently.</Tip>`;
+<Tip>Not seeing the integration you need? [Build your own](/guides/functions/functions-guide) independently.</Tip>`;
 }
 
 interface Endpoint {
@@ -207,12 +234,9 @@ function buildEndpoints(type: string, syncOrAction: any, integration: string, sy
     const endpoints: Endpoint[] = [];
     if (syncOrAction) {
         for (const item of syncOrAction) {
-            if (!item?.endpoints && !item?.endpoint) {
-                continue;
-            }
-
             const endpointOrEndpoints = item?.endpoint || item?.endpoints;
-            const currentEndpoints = Array.isArray(endpointOrEndpoints) ? endpointOrEndpoints : [endpointOrEndpoints];
+            const normalizedEndpoints = Array.isArray(endpointOrEndpoints) ? endpointOrEndpoints : endpointOrEndpoints ? [endpointOrEndpoints] : [];
+            const currentEndpoints = normalizedEndpoints.length > 0 ? normalizedEndpoints : [undefined];
             for (const endpoint of currentEndpoints) {
                 endpoints.push({
                     functionName: item.name,

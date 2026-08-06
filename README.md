@@ -2,91 +2,140 @@
 
 <img src="/assets/nango-logo.png?raw=true" width="350">
 
+# Build product integrations with AI.
+
+Connect your product & AI agents with 900+ APIs. Build, run, and maintain integrations with AI in code, on infrastructure built for scale.
+
+[Website](https://nango.dev) · [Docs](https://nango.dev/docs/) · [900+ APIs](https://nango.dev/docs/integrations/overview/) · [Slack Community](https://nango.dev/slack)
+
+[![GitHub Stars](https://img.shields.io/github/stars/NangoHQ/nango?style=social)](https://github.com/NangoHQ/nango/stargazers)
+[![License](https://img.shields.io/badge/license-Elastic-blue.svg)](https://github.com/NangoHQ/nango/blob/master/LICENSE)
+[![NPM Downloads](https://img.shields.io/npm/dm/@nangohq/node)](https://www.npmjs.com/package/@nangohq/node)
+
 </div>
 
-<h1 align="center">Infrastructure for product integrations.</h1>
+## What is Nango?
 
-<div align="center">
-Easily integrate your SaaS product & AI agent with 500+ APIs.
-</div>
+Nango is an open-source platform for building product integrations. It supports [**900+ APIs**](https://nango.dev/docs/integrations/overview) and works with any backend language, AI coding tool, and agent SDK.
 
-<p align="center">
-    <br />
-    <a href="https://nango.dev/docs/" rel="dofollow"><strong>Explore the docs »</strong></a>
-    <br />
+You write integration logic as TypeScript functions, or let AI generate them for you, and deploy to Nango's production runtime. Nango handles auth, execution, scaling, and observability.
 
-  <br/>
-    <a href="https://nango.dev/integrations">500+ supported APIs</a>
-    ·
-    <a href="https://nango.dev">Website</a>
-    ·
-    <a href="https://nango.dev/slack">Slack Community</a>
-</p>
+**Used in production by Replit, Ramp, Mercor, and hundreds more.**
 
-## Core features
+## How it works
 
-Nango is a complete infrastructure for engineers to build **product integrations**.[<sup>1</sup>](#what-are-product-integrations)
+Nango gives you three primitives that cover every integration pattern:
 
-- **[API Auth](https://nango.dev/docs/guides/use-cases/api-auth)** for [500+ APIs](https://www.nango.dev/api-integrations)
-    - **Embedded, white-label auth UI**: With appropriate input forms and guidance.
-    - **Secure credential management**: Retrieval, storage, and refreshing of API credentials.
-    - **Credential monitoring**: Notifies via webhooks when credentials become invalid.
-- **[Request proxying](https://nango.dev/docs/guides/use-cases/proxy)**: Injects credentials into API requests seamlessly.
-- **[Data Syncing](https://nango.dev/docs/guides/use-cases/syncs)**: Continuously synchronize data from APIs to your application.
-- **[Actions](https://nango.dev/docs/guides/use-cases/actions)**: Encapsulate use cases into reusable actions.
-- **[Webhooks](https://nango.dev/docs/guides/use-cases/webhooks)**: Listen to webhooks from APIs with a universal interface.
-- **[AI tool calling & MCP server](https://nango.dev/docs/guides/use-cases/ai-tool-calling)**: Expose your integrations as tools to any LLM or AI agent.
-- **[Observability](https://nango.dev/docs/guides/platform/logs)**: Tailored monitoring for integrations.
-- **Management dashboard & APIs**: Control and oversee all connected accounts.
+### 1. Auth
 
-## Benefits
+Managed OAuth, API keys, and token refresh for 900+ APIs. Embed a white-label auth flow in your app. Nango handles credentials, token storage, and multi-tenant connection management.
 
-- **Speed**: Eliminates the need to build authorization flows and infrastructure for each API.
-- **Reliability**: Provides a robust solution from day one.
-- **Security**: Ensures secure storage and retrieval of API credentials & user data.
-- **Observability**: Provides full visibility into every interaction with the external API.
-- **Modularity**: Pick the features you want to use, without vendor lock-in.
+```typescript
+// Embed auth in your frontend
+nango.openConnectUI({ onEvent: (event) => { /* handle completion */ } });
+```
 
-By leveraging Nango, developers can save days per integration and months over time.
+### 2. Proxy
 
-## Our approach to integrations
+Make authenticated API requests on behalf of your users. Send requests through Nango's proxy: it resolves the provider, injects credentials, handles retries and rate limits, and returns the response.
 
-We believe engineering teams should build their own integrations.
+```typescript
+import { Nango } from '@nangohq/node';
 
-Our goal with Nango is to provide a better way to do this:
-- Nango provides the infrastructure to build reliable, scalable integrations fast: API auth, syncing framework, webhook handling, observability, etc.
-- You focus on what makes your integration great for your customers: Seamless product mappings, excellent UX, and deep integration with your existing product.
+const nango = new Nango({ secretKey: '<NANGO-SECRET-KEY>' });
 
-[Read more about our approach](https://nango.dev/docs/getting-started/intro-to-nango#our-approach-to-integrations).
+// Make an authenticated request to any API
+const response = await nango.get({
+    endpoint: '/v3/contacts',
+    providerConfigKey: '<INTEGRATION-ID>',
+    connectionId: '<CONNECTION-ID>'
+});
+```
 
-## Getting started
+### 3. Functions
 
-Access any API in minutes, and fully embed the flow within your app in an hour.
+Write integration logic as TypeScript functions and deploy to Nango. Functions execute on a production runtime with built-in API access, retries, storage, and observability.
 
-Follow the [quickstart](https://nango.dev/docs/getting-started/quickstart) and [explore the docs](https://nango.dev/docs).
+Use the **AI builder** to generate them from a description of your use case.
+
+```typescript
+export default async function run(nango: Nango) {
+    const { owner, repo, title, body } = nango.input;
+    
+    const response = await nango.post({
+        endpoint: `/repos/${owner}/${repo}/issues`,
+        data: { title, body }
+    });
+    
+    return response.data;
+}
+```
+
+## What you can build
+
+Nango supports every common integration pattern:
+
+| Use case | Description |
+| --- | --- |
+| [**AI tool calling & MCP**](https://nango.dev/docs/getting-started/use-cases/tool-calling) | Give AI agents the ability to act on external APIs |
+| [**Data syncing**](https://nango.dev/docs/guides/functions/syncs/sync-functions) | One or two-way sync for RAG pipelines, indexing, and triggers |
+| [**Webhook processing**](https://nango.dev/docs/getting-started/use-cases/webhooks-from-external-apis) | Receive and process webhooks from external APIs reliably |
+| [**API unification**](https://nango.dev/docs/getting-started/use-cases/unified-apis) | Normalize APIs to your own universal schema |
+| [**Actions**](https://nango.dev/docs/guides/functions/action-functions) | Write data and execute operations on behalf of your users |
+| [**Per-customer config**](https://nango.dev/docs/getting-started/use-cases/customer-configuration) | Customize integration behavior for each customer |
+
+## Quickstart
+
+Get up and running in under 5 minutes:
+
+**1. Create an integration.** [Sign up](https://app.nango.dev/signup) (free, no credit card), then configure a new integration in the Integrations tab.
+
+**2. Authorize the API.** On the Connections tab, create a connection and complete the auth flow. Later, embed this in your product:
+
+```typescript
+nango.openConnectUI({ onEvent: (event) => { /* handle completion */ } });
+```
+
+**3. Access the API.** Retrieve credentials and make authenticated requests:
+
+```typescript
+import { Nango } from '@nangohq/node';
+
+const nango = new Nango({ secretKey: '<NANGO-SECRET-KEY>' });
+
+const connection = await nango.getConnection('<INTEGRATION-ID>', '<CONNECTION-ID>');
+console.log(connection.credentials);
+```
+
+Embed the [Auth](https://nango.dev/docs/guides/auth/auth-guide) flow in your product, make requests with the [Proxy](https://nango.dev/docs/guides/platform/proxy-requests), or build custom integrations with [Functions](https://nango.dev/docs/guides/functions/functions-guide).
+
+## Why Nango?
+
+**AI-generated, human-controlled code.**
+Nango's AI builder generates TypeScript integration functions from natural language. Unlike black-box solutions, you get readable code you can review, edit, and version control. With full type safety and a built-in testing framework.
+
+**Production-grade infrastructure.** 
+Nango processes billions of API requests. The runtime provides per-tenant isolation, elastic scaling, automatic retries, and rate-limit handling. Battle-tested by hundreds of companies in production.
+
+**Auth for 900+ APIs, out of the box.** 
+OAuth flows, token refresh, credential storage, and multi-tenant support handled for you. Connect to any API without building auth from scratch.
+
+**Open source and self-hostable.** 
+Nango is fully open source. Run it on Nango Cloud or self-host on your own infrastructure. SOC 2 Type II, HIPAA, and GDPR compliant.
+
+**Fits your workflow.** 
+Fully operable via CLI and API. Compatible with any backend language or framework, AI coding tools (Cursor, Codex, Claude Code), and agent SDKs (MCP, LangChain).
 
 ## Open-source vs. paid
 
-Nango is offered under the [Elastic license](https://github.com/NangoHQ/nango/blob/master/LICENSE).
+Nango is available under the [Elastic License](https://github.com/NangoHQ/nango/blob/master/LICENSE). The Cloud and Enterprise Self-Hosted versions give you access to all features, based on your [plan](https://www.nango.dev/pricing). You can also [self-host for free](https://nango.dev/docs/guides/platform/self-hosting#free-self-hosting) with a limited feature set.
 
-You can [self-host it for free](https://nango.dev/docs/guides/self-hosting/free-self-hosting/overview) with a limited feature set.
+## Contributing
 
-Our cloud and Enterprise self-hosted version let you access all features, according to your [plan](https://www.nango.dev/pricing).
+We welcome contributions — anyone can [add support for a new API](https://nango.dev/docs/integrations/contribute-or-request-api).
 
-## Contributors
-
-Anybody can [contribute support for a new API](https://nango.dev/docs/implementation-guides/platform/contribute-new-api).
-
-Thank you for continuously making Nango better ❤️
+Thank you to all contributors ❤️
 
 <a href="https://github.com/nangohq/nango/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=nangohq/nango" />
 </a>
-
-## History
-
-Pizzly (a simple service for OAuth) was initially developed by the team at [Bearer](https://www.bearer.com/?ref=pizzly) with contributions of more than 40 individuals. Over time the focus of Bearer shifted and they could no longer maintain Pizzly. In late 2022 the team at [Nango](https://www.nango.dev) adopted the project and has since maintained and evolved it together with the growing Nango community.
-
-## What are product integrations?
-
-**Product integrations** *(noun)*: The capability within a software product that enables users to connect their external accounts (such as third-party SaaS tools or APIs) to your application, allowing for secure data exchange and interoperability between systems.

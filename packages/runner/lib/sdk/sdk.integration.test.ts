@@ -3,14 +3,14 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { multipleMigrations } from '@nangohq/database';
 import { connectionService, environmentService, seeders } from '@nangohq/shared';
 
-import { Locks } from './locks.js';
+import { MapLocks } from './locks.js';
 import { NangoActionRunner } from './sdk.js';
 
-import type { DBEnvironment, DBSyncConfig, NangoProps } from '@nangohq/types';
+import type { ApiPublicConnectionFull, DBEnvironment, DBSyncConfig, NangoProps } from '@nangohq/types';
 
 describe('Connection service integration tests', () => {
     let env: DBEnvironment;
-    const locks = new Locks();
+    const locks = new MapLocks();
     beforeAll(async () => {
         await multipleMigrations();
         env = await seeders.createEnvironmentSeed();
@@ -75,7 +75,8 @@ describe('Connection service integration tests', () => {
                     errors: [],
                     created_at: response.created_at.toISOString(),
                     updated_at: response.updated_at.toISOString(),
-                    last_fetched_at: response.last_fetched_at?.toISOString() || null
+                    last_fetched_at: response.last_fetched_at?.toISOString() || null,
+                    credentials: response.credentials as ApiPublicConnectionFull['credentials']
                 };
             };
 

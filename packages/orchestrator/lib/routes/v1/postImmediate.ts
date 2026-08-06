@@ -1,5 +1,6 @@
 import * as z from 'zod';
 
+import { isDuplicateTaskNameError } from '@nangohq/scheduler';
 import { validateRequest } from '@nangohq/utils';
 
 import { actionArgsSchema, onEventArgsSchema, syncAbortArgsSchema, syncArgsSchema, webhookArgsSchema } from '../../clients/validate.js';
@@ -8,10 +9,36 @@ import type { TaskType } from '../../types.js';
 import type { Scheduler } from '@nangohq/scheduler';
 import type { ApiError, Endpoint } from '@nangohq/types';
 import type { EndpointRequest, EndpointResponse, Route, RouteHandler } from '@nangohq/utils';
-import type { JsonValue } from 'type-fest';
+import type { JsonObject } from 'type-fest';
 
 const path = '/v1/immediate';
 const method = 'POST';
+
+export interface ImmediateSuccess {
+    taskId: string;
+    retryKey: string;
+}
+
+export const immediateTaskSchema = z
+    .object({
+        name: z.string().min(1),
+        ownerKey: z.string().optional().default(''), // for backwards compatibility. TODO: replace with z.string() once all callers are updated
+        group: z.object({
+            key: z.string().min(1),
+            maxConcurrency: z.coerce.number()
+        }),
+        retry: z.object({
+            count: z.number().int(),
+            max: z.number().int()
+        }),
+        timeoutSettingsInSecs: z.object({
+            createdToStarted: z.number().int().positive(),
+            startedToCompleted: z.number().int().positive(),
+            heartbeat: z.number().int().positive()
+        }),
+        args: z.discriminatedUnion('type', [syncArgsSchema, actionArgsSchema, webhookArgsSchema, onEventArgsSchema, syncAbortArgsSchema])
+    })
+    .strict();
 
 export type PostImmediate = Endpoint<{
     Method: typeof method;
@@ -32,57 +59,14 @@ export type PostImmediate = Endpoint<{
             startedToCompleted: number;
             heartbeat: number;
         };
-        args: JsonValue & { type: TaskType };
+        args: JsonObject & { type: TaskType };
     };
-    Error: ApiError<'immediate_failed'>;
-    Success: { taskId: string; retryKey: string };
+    Error: ApiError<'immediate_failed' | 'duplicate_task_name'>;
+    Success: ImmediateSuccess;
 }>;
-
-function argsSchema(data: any) {
-    if ('args' in data && 'type' in data.args) {
-        const taskType = data.args.type as TaskType;
-        switch (taskType) {
-            case 'sync':
-                return syncArgsSchema;
-            case 'action':
-                return actionArgsSchema;
-            case 'webhook':
-                return webhookArgsSchema;
-            case 'on-event':
-                return onEventArgsSchema;
-            case 'abort':
-                return syncAbortArgsSchema;
-            default:
-                ((_exhaustiveCheck: never) => {
-                    z.never();
-                })(taskType);
-        }
-    }
-    return z.never();
-}
 
 const validate = validateRequest<PostImmediate>({
     parseBody: (data: any) => {
-        const schema = z
-            .object({
-                name: z.string().min(1),
-                ownerKey: z.string().optional().default(''), // for backwards compatibility. TODO: replace with z.string() once all callers are updated
-                group: z.object({
-                    key: z.string().min(1),
-                    maxConcurrency: z.coerce.number()
-                }),
-                retry: z.object({
-                    count: z.number().int(),
-                    max: z.number().int()
-                }),
-                timeoutSettingsInSecs: z.object({
-                    createdToStarted: z.number().int().positive(),
-                    startedToCompleted: z.number().int().positive(),
-                    heartbeat: z.number().int().positive()
-                }),
-                args: argsSchema(data)
-            })
-            .strict();
         return z
             .preprocess((o) => {
                 // for backwards compatibility
@@ -91,7 +75,7 @@ const validate = validateRequest<PostImmediate>({
                     return { ...rest, group: { key: groupKey, maxConcurrency: 0 } };
                 }
                 return o;
-            }, schema)
+            }, immediateTaskSchema)
             .parse(data);
     }
 });
@@ -111,6 +95,16 @@ const handler = (scheduler: Scheduler) => {
             heartbeatTimeoutSecs: res.locals.parsedBody.timeoutSettingsInSecs.heartbeat
         });
         if (task.isErr()) {
+            if (isDuplicateTaskNameError(task.error)) {
+                res.status(409).json({
+                    error: {
+                        code: 'duplicate_task_name',
+                        message: task.error.message
+                    }
+                });
+                return;
+            }
+
             res.status(500).json({ error: { code: 'immediate_failed', message: task.error.message } });
             return;
         }

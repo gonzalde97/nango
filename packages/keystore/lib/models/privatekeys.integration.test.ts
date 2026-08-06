@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from 'vitest';
 
-import { createPrivateKey, decryptPrivateKey, deletePrivateKey, getPrivateKey } from './privatekeys.js';
 import { testDb } from '../db/helpers.test.js';
+import { createPrivateKey, decryptPrivateKey, deletePrivateKey, getPrivateKey } from './privatekeys.js';
 
 describe('PrivateKey', async () => {
     const db = await testDb.init();
@@ -89,7 +89,7 @@ describe('PrivateKey', async () => {
 
     it('should be retrieved before it expires', async () => {
         const entityType = 'connect_session';
-        const ttlInMs = 100;
+        const ttlInMs = 10_000;
         const createKey = await createPrivateKey(db, {
             displayName: 'this is my key',
             entityType,

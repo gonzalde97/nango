@@ -1,30 +1,45 @@
+import { format } from 'date-fns';
 import { Info, Loader } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { mutate } from 'swr';
 
-import { PaymentMethodDialog } from './PaymentMethodDialog.js';
-import { Dot } from '../../../../components-v2/Dot.js';
-import { DialogClose, DialogContent, DialogDescription, DialogFooter } from '../../../../components-v2/ui/dialog.jsx';
-import { DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/Dialog.js';
-import { StyledLink } from '@/components-v2/StyledLink.js';
-import { Alert, AlertDescription } from '@/components-v2/ui/alert.js';
-import { Button, ButtonLink } from '@/components-v2/ui/button';
-import { Dialog } from '@/components-v2/ui/dialog.js';
-import { Table, TableBody, TableCell, TableRow } from '@/components-v2/ui/table';
-import { useEnvironment } from '@/hooks/useEnvironment';
-import { apiGetCurrentPlan, apiPostPlanChange, useApiGetPlans } from '@/hooks/usePlan';
+import { permissions } from '@nangohq/authz';
+import {
+    Button,
+    Dialog,
+    DialogBody,
+    DialogClose,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+    DialogTrigger
+} from '@nangohq/design-system';
+
+import { PermissionGate } from '@/components/patterns/PermissionGate.js';
+import { Alert, AlertDescription } from '@/components/ui/Alert.js';
+import { ButtonLink } from '@/components/ui/ButtonLink';
+import { StyledLink } from '@/components/ui/StyledLink.js';
+import { Table, TableBody, TableCell, TableRow } from '@/components/ui/Table';
+import { environmentQueryKey, useEnvironment } from '@/hooks/useEnvironment';
+import { usePermissions } from '@/hooks/usePermissions.js';
+import { fetchCurrentPlan, useApiGetPlans, useApiPostPlanChange } from '@/hooks/usePlan';
 import { useStripePaymentMethods } from '@/hooks/useStripe.js';
 import { useToast } from '@/hooks/useToast.js';
 import { queryClient, useStore } from '@/store';
 import { stripePromise } from '@/utils/stripe.js';
+import { Dot } from '../../../../components/ui/Dot.js';
+import { PaymentMethodDialog } from './PaymentMethodDialog.js';
 
 import type { PlanDefinitionList } from '../types.js';
+import type { StripeError } from '@/utils/stripe.js';
 import type { PlanDefinition, StripePaymentMethod } from '@nangohq/types';
 
 export const Plans: React.FC = () => {
     const env = useStore((state) => state.env);
 
-    const { plan: currentPlan } = useEnvironment(env);
+    const { data: environmentData } = useEnvironment(env);
+    const currentPlan = environmentData?.plan;
     const { data: plansList } = useApiGetPlans(env);
     const { data: paymentMethods } = useStripePaymentMethods(env);
 
@@ -33,11 +48,16 @@ export const Plans: React.FC = () => {
     }, [paymentMethods]);
 
     const futurePlan = useMemo(() => {
-        if (!currentPlan?.orb_future_plan) {
+        if (!currentPlan?.orb_future_plan || !currentPlan.orb_future_plan_at) {
             return null;
         }
 
-        return plansList?.data.find((p) => p.code === currentPlan.orb_future_plan);
+        const plan = plansList?.data.find((p) => p.code === currentPlan.orb_future_plan);
+        if (!plan) {
+            return null;
+        }
+
+        return { plan, futurePlanAt: format(new Date(currentPlan.orb_future_plan_at), 'yyyy-MM-dd') };
     }, [currentPlan, plansList]);
 
     const plans = useMemo<null | { list: PlanDefinitionList[]; activePlan: PlanDefinition }>(() => {
@@ -70,11 +90,11 @@ export const Plans: React.FC = () => {
             return null;
         }
 
-        if (futurePlan?.code !== 'free') {
-            return `Your ${plans?.activePlan.title} subscription will switch to Starter at the end of the month.`;
+        if (futurePlan.plan?.code === 'free') {
+            return `Your ${plans?.activePlan.title} subscription has been cancelled and will terminate at the end of the month.`;
         }
 
-        return `Your ${plans?.activePlan.title} subscription has been cancelled and will terminate at the end of the month.`;
+        return `Your ${plans?.activePlan.title} subscription will switch to ${futurePlan.plan?.title} on ${futurePlan.futurePlanAt}.`;
     }, [futurePlan, plans?.activePlan.title]);
 
     return (
@@ -116,6 +136,9 @@ const PlanRow: React.FC<{ planDefinition: PlanDefinitionList; activePlan?: PlanD
 }) => {
     const { plan, active, isFuture, isDowngrade, isUpgrade } = planDefinition;
 
+    const { can } = usePermissions();
+    const canChangePlan = can(permissions.canChangePlan);
+
     const [paymentMethodDialogOpen, setPaymentMethodDialogOpen] = useState(false);
     const [planChangeDialogOpen, setPlanChangeDialogOpen] = useState(false);
 
@@ -130,14 +153,14 @@ const PlanRow: React.FC<{ planDefinition: PlanDefinitionList; activePlan?: PlanD
     const ButtonComponent = useMemo(() => {
         if (active) {
             return (
-                <Button disabled variant="secondary" className="w-27">
+                <Button disabled variant="outline" className="w-27">
                     Current plan
                 </Button>
             );
         }
         if (isFuture) {
             return (
-                <Button disabled variant="secondary" className="w-27">
+                <Button disabled variant="outline" className="w-27">
                     Scheduled
                 </Button>
             );
@@ -146,9 +169,13 @@ const PlanRow: React.FC<{ planDefinition: PlanDefinitionList; activePlan?: PlanD
         if (isUpgrade && plan.canChange) {
             return (
                 <>
-                    <Button onClick={onUpgradeClicked} variant="primary" className="w-27">
-                        Upgrade
-                    </Button>
+                    <PermissionGate asChild condition={canChangePlan}>
+                        {(allowed) => (
+                            <Button onClick={onUpgradeClicked} variant="primary" className="w-27" disabled={!allowed}>
+                                Upgrade
+                            </Button>
+                        )}
+                    </PermissionGate>
                     <PaymentMethodDialog
                         open={paymentMethodDialogOpen}
                         onOpenChange={setPaymentMethodDialogOpen}
@@ -166,16 +193,26 @@ const PlanRow: React.FC<{ planDefinition: PlanDefinitionList; activePlan?: PlanD
 
         if (isDowngrade && plan.canChange) {
             return (
-                <PlanChangeDialog selectedPlan={planDefinition} activePlan={activePlan}>
-                    <Button variant="destructive" className="w-27">
-                        Downgrade
-                    </Button>
-                </PlanChangeDialog>
+                <>
+                    <PermissionGate asChild condition={canChangePlan}>
+                        {(allowed) => (
+                            <Button onClick={() => setPlanChangeDialogOpen(true)} variant="danger" className="w-27" disabled={!allowed}>
+                                Downgrade
+                            </Button>
+                        )}
+                    </PermissionGate>
+                    <PlanChangeDialog
+                        open={planChangeDialogOpen}
+                        onOpenChange={setPlanChangeDialogOpen}
+                        selectedPlan={planDefinition}
+                        activePlan={activePlan}
+                    />
+                </>
             );
         }
 
         return (
-            <ButtonLink variant="secondary" className="w-27" to="https://nango.dev/support" target="_blank">
+            <ButtonLink variant="outline" className="w-27" to="https://nango.dev/demo" target="_blank">
                 Contact us
             </ButtonLink>
         );
@@ -184,7 +221,7 @@ const PlanRow: React.FC<{ planDefinition: PlanDefinitionList; activePlan?: PlanD
     return (
         <TableRow>
             <TableCell className="w-1/3 font-medium">
-                <div className="inline-flex items-center gap-1 py-3 text-text-primary text-body-medium-medium">
+                <div className="inline-flex items-center gap-1 py-3 text-text-strong text-body-medium-medium">
                     {plan.title} {active && <Dot />}
                 </div>
             </TableCell>
@@ -214,15 +251,37 @@ const PlanChangeDialog: React.FC<{
             if (!isControlled) {
                 setInternalOpen(value);
             }
+            if (!value) {
+                setError(null);
+            }
             onOpenChange?.(value);
         },
         [isControlled, onOpenChange]
     );
 
+    const { mutateAsync: postPlanChange } = useApiPostPlanChange(env);
+
     const [loading, setLoading] = useState(false);
     const [longWait, setLongWait] = useState(false);
+    const [error, setError] = useState<string | null>(null);
 
     const refInterval = useRef<NodeJS.Timeout>();
+
+    /**
+     * Extracts a `card_error` from the Stripe error or fallback to `defaultError`.
+     *
+     * @param error - The `StripeError` object returned from `confirmCardPayment`
+     * @param defaultError - Fallback message when the error type is not user-actionable
+     * @returns `card_error` message if present, otherwise the `defaultError`
+     */
+    const getStripeCardErrorOrDefault = (error: StripeError, defaultError: string = 'An error occurred while validating your payment.') => {
+        switch (error.type) {
+            case 'card_error':
+                return error.message ?? defaultError;
+            default:
+                return defaultError;
+        }
+    };
 
     const onUpgrade = async () => {
         if (!selectedPlan?.plan.code) {
@@ -231,22 +290,29 @@ const PlanChangeDialog: React.FC<{
 
         setLoading(true);
         setLongWait(false);
+        setError(null);
 
-        const res = await apiPostPlanChange(env, { orbId: selectedPlan.plan.code });
-        if ('error' in res.json) {
+        let json: Awaited<ReturnType<typeof postPlanChange>>;
+        try {
+            json = await postPlanChange({ orbId: selectedPlan.plan.code });
+        } catch {
             setLoading(false);
-            toast({ title: 'Failed to upgrade, an error occurred', variant: 'error' });
+            setError('An error occurred. Please try again.');
             return;
         }
 
-        if ('paymentIntent' in res.json.data) {
-            res.json.data.paymentIntent;
+        if ('paymentIntent' in json.data) {
             const stripe = await stripePromise;
-            const result = await stripe!.confirmCardPayment(res.json.data.paymentIntent.client_secret);
+            if (!stripe) {
+                setLoading(false);
+                setError('Payment processor failed to load. Please refresh the page and try again.');
+                return;
+            }
 
+            const result = await stripe.confirmCardPayment(json.data.paymentIntent.client_secret);
             if (result.error) {
-                console.error({ error: result.error });
-                toast({ title: 'An error occurred while validating your payment', variant: 'error' });
+                setLoading(false);
+                setError(getStripeCardErrorOrDefault(result.error));
                 return;
             } else if (result.paymentIntent.status === 'succeeded') {
                 console.log('payment success', result);
@@ -254,11 +320,11 @@ const PlanChangeDialog: React.FC<{
         }
 
         refInterval.current = setInterval(async () => {
-            const res = await apiGetCurrentPlan(env);
-            if ('error' in res.json) {
+            const json = await fetchCurrentPlan(env).catch(() => null);
+            if (!json) {
                 return;
             }
-            if (res.json.data.name !== selectedPlan.plan.code) {
+            if (json.data.name !== selectedPlan.plan.code) {
                 setLongWait(true);
                 return;
             }
@@ -267,8 +333,7 @@ const PlanChangeDialog: React.FC<{
 
             await Promise.all([
                 queryClient.invalidateQueries({ exact: false, queryKey: ['plans'], type: 'all' }),
-                queryClient.refetchQueries({ exact: false, queryKey: ['plans'], type: 'all' }),
-                mutate((key) => typeof key === 'string' && key.startsWith(`/api/v1/environments`))
+                queryClient.invalidateQueries({ queryKey: environmentQueryKey(env) })
             ]);
 
             setLongWait(false);
@@ -284,19 +349,22 @@ const PlanChangeDialog: React.FC<{
         }
 
         setLoading(true);
-        const res = await apiPostPlanChange(env, { orbId: selectedPlan.plan.code });
-        if ('error' in res.json) {
+        setError(null);
+
+        try {
+            await postPlanChange({ orbId: selectedPlan.plan.code });
+        } catch {
             setLoading(false);
-            toast({ title: 'Failed to downgrade, an error occurred', variant: 'error' });
+            setError('An error occurred. Please try again.');
             return;
         }
 
         refInterval.current = setInterval(async () => {
-            const res = await apiGetCurrentPlan(env);
-            if ('error' in res.json) {
+            const json = await fetchCurrentPlan(env).catch(() => null);
+            if (!json) {
                 return;
             }
-            if (res.json.data.orb_future_plan !== selectedPlan.plan.code) {
+            if (json.data.orb_future_plan !== selectedPlan.plan.code) {
                 setLongWait(true);
                 return;
             }
@@ -305,8 +373,7 @@ const PlanChangeDialog: React.FC<{
 
             await Promise.all([
                 queryClient.invalidateQueries({ exact: false, queryKey: ['plans'], type: 'all' }),
-                queryClient.refetchQueries({ exact: false, queryKey: ['plans'], type: 'all' }),
-                mutate((key) => typeof key === 'string' && key.startsWith(`/api/v1/environments`))
+                queryClient.invalidateQueries({ queryKey: environmentQueryKey(env) })
             ]);
 
             setLongWait(false);
@@ -339,24 +406,35 @@ const PlanChangeDialog: React.FC<{
     return (
         <Dialog open={open} onOpenChange={setOpen}>
             {children && <DialogTrigger asChild>{children}</DialogTrigger>}
-            <DialogContent className="text-text-secondary text-sm">
+            <DialogContent>
                 <DialogHeader>
                     <DialogTitle>
                         Confirm {selectedPlan.isUpgrade ? 'upgrade' : 'downgrade'} to {selectedPlan.plan.title} plan
                     </DialogTitle>
                     <DialogDescription className="sr-only">{description}</DialogDescription>
                 </DialogHeader>
-                <div className="flex flex-col gap-1">
-                    <p>{description}</p>
-                    {longWait && (
-                        <p className="text-s text-text-tertiary text-right">{selectedPlan.isUpgrade ? 'Payment is processing...' : 'Downgrading...'}</p>
-                    )}
-                </div>
+                <DialogBody>
+                    <div className="flex flex-col gap-4">
+                        <div className="flex flex-col gap-1 text-text-secondary text-sm">
+                            <p>{description}</p>
+                            {longWait && (
+                                <p className="text-s text-text-muted text-right">{selectedPlan.isUpgrade ? 'Payment is processing...' : 'Downgrading...'}</p>
+                            )}
+                        </div>
+                        {error && (
+                            <Alert variant="error">
+                                <AlertDescription>{error}</AlertDescription>
+                            </Alert>
+                        )}
+                    </div>
+                </DialogBody>
                 <DialogFooter>
                     <DialogClose asChild>
-                        <Button variant="secondary">Cancel</Button>
+                        <Button variant="outline" size="sm">
+                            Cancel
+                        </Button>
                     </DialogClose>
-                    <Button variant="primary" onClick={selectedPlan.isUpgrade ? onUpgrade : onDowngrade} disabled={loading}>
+                    <Button variant="primary" size="sm" onClick={selectedPlan.isUpgrade ? onUpgrade : onDowngrade} disabled={loading}>
                         {loading && <Loader className="size-4 animate-spin" />}
                         {selectedPlan.isUpgrade ? 'Upgrade' : 'Downgrade'}
                     </Button>

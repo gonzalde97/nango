@@ -5,6 +5,10 @@ import { basePublicUrl } from '@nangohq/utils';
 
 import type { DBInvitation, DBTeam, DBUser } from '@nangohq/types';
 
+export function sanitizeEmailSubject(subject: string): string {
+    return subject.replace(/[\r\n]+/g, ' ');
+}
+
 export async function sendVerificationEmail(email: string, name: string, token: string) {
     const emailClient = EmailClient.getInstance();
     await emailClient.send(
@@ -44,24 +48,56 @@ export async function sendInviteEmail({
     email,
     account,
     user,
-    invitation
+    invitation,
+    isExistingUser = false
 }: {
     email: string;
     account: DBTeam;
     user: Pick<DBUser, 'name'>;
     invitation: DBInvitation;
+    isExistingUser?: boolean;
 }) {
     const emailClient = EmailClient.getInstance();
+    const inviteLink = isExistingUser ? `${basePublicUrl}/signin?next=/signup/${invitation.token}` : `${basePublicUrl}/signup/${invitation.token}`;
+    const callToAction = isExistingUser
+        ? `Log in to accept the invitation by clicking <a href="${inviteLink}">here</a>.`
+        : `Join this team by clicking <a href="${inviteLink}">here</a> and completing your signup.`;
+
     await emailClient.send(
         email,
-        `You're Invited! Join "${he.encode(account.name)}" on Nango`,
+        sanitizeEmailSubject(`You're Invited! Join "${account.name}" on Nango`),
         `<p>Hi,</p>
 
 <p>${he.encode(user.name)} invites you to join "${he.encode(account.name)}" on Nango.</p>
 
-<p>Join this team by clicking <a href="${basePublicUrl}/signup/${invitation.token}">here</a> and completing your signup.</p>
+<p>${callToAction}</p>
 
 <p>Questions or issues? We are happy to help on the <a href="https://nango.dev/slack">Slack community</a>!</p>
+
+<p>Best,<br>
+Team Nango</p>
+            `
+    );
+}
+
+export async function sendAccountInvitationRequestEmail({
+    email,
+    account,
+    requester
+}: {
+    email: string;
+    account: Pick<DBTeam, 'name'>;
+    requester: Pick<DBUser, 'name' | 'email'>;
+}) {
+    const emailClient = EmailClient.getInstance();
+    await emailClient.send(
+        email,
+        sanitizeEmailSubject(`${requester.name} wants to join "${account.name}" on Nango`),
+        `<p>Hi,</p>
+
+<p><strong>${he.encode(requester.name)}</strong> (${he.encode(requester.email)}) has requested to join <strong>${he.encode(account.name)}</strong> on Nango.</p>
+
+<p>Their email address has been verified. To invite them, go to <a href="${basePublicUrl}/team-settings">Team Settings</a>.</p>
 
 <p>Best,<br>
 Team Nango</p>
